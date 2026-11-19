@@ -246,3 +246,60 @@ pub async fn logout(State(state): State<AppState>, meta: RequestMeta, auth: Sess
 pub async fn me(user: CurrentUser) -> Json<MeResponse> {
     Json(MeResponse { id: user.id, username: user.username, role: user.role, csrf_token: user.session.csrf_token })
 }
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordChange {
+    #[schema(value_type = String, format = Password)]
+    current_password: SecretString,
+    #[schema(value_type = String, format = Password)]
+    new_password: SecretString,
+}
+
+/// `POST /auth/password` — change your own password. Other sessions are ended; this one
+/// stays. A wrong current password counts as a failed login (lockout applies).
+#[utoipa::path(post, path = "/api/v1/auth/password", tag = "auth", request_body = PasswordChange,
+    responses((status = 204, description = "Password changed, other sessions ended"),
+              (status = 401, body = Problem, content_type = "application/problem+json"),
+              (status = 422, description = "Wrong current password or weak new password", body = Problem, content_type = "application/problem+json"),
+              (status = 429, body = Problem, content_type = "application/problem+json")),
+    security(("session" = [], "csrf" = [])))]
+pub async fn change_password(
+    State(state): State<AppState>,
+    meta: RequestMeta,
+    user: CurrentUser,
+    ApiJson(req): ApiJson<PasswordChange>,
+) -> ApiResult<StatusCode> {
+    if !state.limiters.login_per_user.check(&format!("password:{}", user.id)) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let current = req.current_password.expose_secret();
+    let new = req.new_password.expose_secret();
+    if current.len() > password::MAX_PASSWORD_BYTES {
+        return Err(ApiError::Unprocessable("current password is incorrect".into()));
+    }
+    password::check_policy(&user.username, new).map_err(|e| ApiError::Unprocessable(e.to_string()))?;
+    if current == new {
+        return Err(ApiError::Unprocessable("new password must differ from the current one".into()));
+    }
+
+    let mut conn = state.db.acquire().await?;
+    let row = users::find_by_username(&mut conn, &user.username).await?.ok_or(ApiError::Unauthorized)?;
+    drop(conn);
+    let ok = password::verify_blocking(Zeroizing::new(current.to_owned()), Some(row.password_hash)).await?;
+    let mut tx = state.db.begin().await?;
+    if !ok {
+        let locked = users::register_failure(&mut tx, user.id).await?;
+        let ev = meta.user_event(user.id, "auth.password_change.failed").details(json!({ "locked": locked }));
+        audit::record(&mut tx, &ev).await?;
+        tx.commit().await?;
+        return Err(ApiError::Unprocessable("current password is incorrect".into()));
+    }
+    let phc = password::hash_blocking(Zeroizing::new(new.to_owned())).await?;
+    users::set_password(&mut tx, user.id, &phc).await?;
+    let ended = session::delete_others(&mut tx, user.id, &user.session.session.token_hash).await?;
+    let ev = meta.user_event(user.id, "auth.password_changed").details(json!({ "other_sessions_ended": ended }));
+    audit::record(&mut tx, &ev).await?;
+    tx.commit().await?;
+    Ok(StatusCode::NO_CONTENT)
+}

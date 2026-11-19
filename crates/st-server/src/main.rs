@@ -97,7 +97,15 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     let ingest = app::IngestLimits { digests_per_hour: config.ingest_digests_per_hour, ..app::IngestLimits::default() };
     let state = AppState::new(pool, config.pepper, config.data_key, config.auth).with_ingest_limits(ingest);
     let limits = HttpLimits { request_timeout: config.request_timeout, max_body_bytes: config.max_body_bytes };
-    let router = app::router(state, limits);
+    let web = match &config.web_dir {
+        Some(dir) => {
+            let assets = st_server::web::WebAssets::load(dir).context("cannot load the web UI (ST_WEB_DIR)")?;
+            tracing::info!(files = assets.len(), "serving the web UI");
+            Some(std::sync::Arc::new(assets))
+        }
+        None => None,
+    };
+    let router = app::router_with_web(state, limits, web);
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await

@@ -10,6 +10,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p st-server \
  && cp target/release/secrettrace-server /secrettrace-server
 
+# Web UI: static build only; node never reaches a runtime image.
+FROM node:22-bookworm-slim AS web
+WORKDIR /src/web
+COPY web/package.json web/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
+COPY web ./
+COPY testdata /src/testdata
+RUN npm run build
+
 # Worker: needs git and ssh to fetch repositories. Same binary, non-root, no package
 # caches. Build with `--target worker`.
 FROM debian:bookworm-slim AS worker
@@ -28,6 +37,8 @@ CMD ["worker"]
 # API server (default target, last): no shell, no package manager, non-root.
 FROM gcr.io/distroless/cc-debian12:nonroot AS server
 COPY --from=build /secrettrace-server /usr/local/bin/secrettrace-server
+COPY --from=web /src/web/dist /usr/share/secrettrace/web
+ENV ST_WEB_DIR=/usr/share/secrettrace/web
 USER nonroot:nonroot
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/secrettrace-server"]

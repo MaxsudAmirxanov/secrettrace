@@ -39,6 +39,8 @@ pub struct Config {
     pub max_body_bytes: usize,
     /// Unique digests one API token may submit to `/ingest/…/match` per hour.
     pub ingest_digests_per_hour: u32,
+    /// Built web UI (`web/dist`) served on non-API paths; `None` serves the API only.
+    pub web_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -102,6 +104,7 @@ impl Config {
                 }
                 n => n,
             },
+            web_dir: env.get("ST_WEB_DIR").filter(|d| !d.trim().is_empty()).map(std::path::PathBuf::from),
         })
     }
 }

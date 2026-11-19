@@ -4,9 +4,10 @@
 секрет, кто им пользуется и не утёк ли он туда, где его быть не должно. Хранятся только HMAC-отпечатки,
 не значения.
 
-> Статус: этапы 0–5 из [docs/architecture.md](docs/architecture.md): ядро отпечатков, схема БД, журнал аудита,
-> авторизация (пароль + обязательный TOTP, сессии, CSRF, API-токены, роли), API реестра секретов с allow-rules
-> и OpenAPI. Сканеры, алерты и UI — следующие этапы.
+> Статус: этапы 0–9 и 12 из [docs/architecture.md](docs/architecture.md): ядро отпечатков, схема БД, журнал
+> аудита, авторизация (пароль + обязательный TOTP), реестр секретов, извлечение кандидатов, сканирование
+> git и файлов, приём данных от CI, серверный воркер и веб-интерфейс. Алерты (10), CLI для CI (11), TLS/mTLS (13)
+> и E2E (14) — следующие этапы.
 
 ## Требования
 
@@ -16,9 +17,10 @@
 
 ```sh
 make secrets      # создаёт deploy/secrets/* (пароли БД, pepper); в git не попадают
-make up           # postgres → migrate → server + worker
+make up           # postgres → migrate → server (API + веб-интерфейс) + worker
 curl -s localhost:8080/healthz   # {"status":"ok"}
 curl -s localhost:8080/readyz    # {"status":"ready"}
+make admin NAME=alice            # первый администратор, затем http://localhost:8080
 ```
 
 **Сделайте резервную копию `deploy/secrets/pepper_keys` и `deploy/secrets/data_key`.** Без pepper отпечатки
@@ -72,13 +74,51 @@ cargo run -p st-server -- serve
 cargo run -p st-server -- verify-audit
 ```
 
+## Веб-интерфейс
+
+Каталог `web/`: React 18 + TypeScript, Vite, Tailwind, TanStack Query; без внешних CDN, шрифтов и счётчиков.
+Сервер раздаёт собранный интерфейс сам, если задан `ST_WEB_DIR` (в Docker-образе он уже собран и задан);
+все файлы читаются в память при старте.
+
+| Раздел | Кто видит | Что делает |
+|---|---|---|
+| Обзор | все | открытые и исторические нарушения, график за 30 дней, скомпрометированные и истекающие секреты, последние сканы |
+| Находки | все | все места всех секретов: фильтры «нарушение / разрешено», «в коде / только в истории», поиск, ссылка на файл в коммите (GitHub, GitLab) |
+| Реестр секретов | все; изменения — operator | регистрация, карточка, allow-правила, отзыв и пометка «заменён» |
+| Источники, Сканы | все; запуск — operator | git-репозитории с расписанием, ручной и полный скан, отмена, счётчики |
+| API-токены, Пользователи, Журнал аудита | admin | выпуск и отзыв токенов; роли, отключение, сброс TOTP, разблокировка, новый пароль; журнал с проверкой hash-chain |
+| Учётная запись | все | смена своего пароля (остальные сессии завершаются) |
+
+Безопасность интерфейса:
+
+- **Значение секрета не покидает браузер.** Нормализация и digest — порт `st-core` на TypeScript
+  (`web/src/crypto`), проверенный на тех же векторах `testdata/digest_vectors.json`. Поле очищается до отправки.
+- Сессия — только `HttpOnly; SameSite=Strict` cookie; CSRF-токен живёт в памяти и восстанавливается через
+  `/auth/me`. В `localStorage` хранится лишь выбранная тема.
+- CSP `script-src 'self'; style-src 'self'` без `unsafe-inline`, `frame-ancestors 'none'`, `Referrer-Policy:
+  no-referrer`. QR-код для TOTP рисуется локально. Редирект после входа — только на свои пути.
+- Права в интерфейсе — подсказка; решает сервер.
+
+Разработка:
+
+```sh
+make web-install      # npm ci (точные версии из package-lock.json)
+make web-dev          # :5173, проксирует /api на ST_API_URL (по умолчанию 127.0.0.1:8080)
+make web-test         # vitest: crypto-векторы, вход с TOTP, регистрация без отправки значения, CSRF
+make web-lint         # eslint + tsc
+make web-build        # web/dist; затем ST_WEB_DIR=web/dist secrettrace-server serve
+```
+
+Для dev-сервера на `http://` нужен `ST_COOKIE_SECURE=false` у API.
+
 ## Тесты и проверки
 
 ```sh
 make test         # unit + интеграционные (поднимает Postgres в Docker)
 make test-unit    # без БД
 make lint         # rustfmt --check + clippy pedantic с -D warnings
-make audit        # cargo audit
+make audit        # cargo audit + npm audit (production-зависимости UI)
+make web-test     # тесты интерфейса
 ```
 
 Интеграционные тесты получают отдельную БД на каждый тест.
@@ -124,6 +164,13 @@ make audit        # cargo audit
   повторы с backoff, лимит попыток; отмена, отключение, удаление; остановка цикла; неподдерживаемые URI
   и хосты; отсутствующий, симлинкнутый и пустой credential без утечки содержимого; ssh без known_hosts;
   планировщик ставит одну задачу на источник; жнец закрывает брошенные сканы API; удаление зеркал.
+- `crates/st-server/tests/ui_api.rs`: сводка и общий список находок (фильтры, буквальные `%`, курсор,
+  нет digest и отпечатков), имя источника у сканов, управление пользователями (создание, роли, отключение
+  завершает сессии, сброс TOTP, разблокировка, новый пароль, запрет менять себя, гонка двух администраторов
+  оставляет одного), смена своего пароля, журнал аудита (фильтр по префиксу, курсор, обнаружение подмены),
+  раздача интерфейса с CSP и 404 problem+json для API.
+- `web/src/**/*.test.ts(x)`: digest на общих векторах, вход с привязкой TOTP, регистрация секрета без
+  отправки значения, CSRF только на изменяющих запросах, защита редиректа, генерация паролей.
 - `crates/st-server/tests/auth.rs`: полный вход с привязкой TOTP, ротация сессии после MFA, хранение seed
   только в зашифрованном виде, повторное использование кода, CSRF, одинаковые ответы и блокировка,
   rate-limit, роли, выпуск, проверка и отзыв API-токенов, отсутствие токенов и имён в аудите, сброс MFA.
@@ -360,6 +407,7 @@ secrettrace scan git /srv/mirror.git --rev main --rev ^3687a59   # только 
 | `ST_REQUEST_TIMEOUT_SECS` | `30` | таймаут запроса |
 | `ST_MAX_BODY_BYTES` | `1048576` | лимит тела запроса |
 | `ST_INGEST_DIGESTS_PER_HOUR` | `200000` | уникальных digest'ов в `/match` на API-токен в час |
+| `ST_WEB_DIR` | — | собранный интерфейс (`web/dist`); без него сервер отдаёт только API |
 
 Воркер (`secrettrace-server worker`) читает `ST_DATABASE_URL`, `ST_PEPPER_KEYS`, `ST_LOG*` и свои переменные;
 `ST_DATA_KEY` ему не нужен.
@@ -391,6 +439,7 @@ crates/st-extract  извлечение кандидатов из текста �
 crates/st-source   источники: обход файловой системы и git-истории, пул потоков извлечения
 crates/st-server   API (axum), авторизация, воркер (очередь, планировщик, git fetch), админ-команды, аудит, pepper
 crates/st-cli      CLI `secrettrace`: `digest`, `extract`, `scan fs|git`
+web/               веб-интерфейс (React + TypeScript), порт нормализации и digest в web/src/crypto
 migrations/        SQL-миграции (встраиваются в бинарник)
 testdata/          общие тест-векторы digest (эталон посчитан независимой реализацией на Python)
 deploy/            init-скрипт Postgres, секреты (gitignored)

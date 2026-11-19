@@ -6,9 +6,9 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request};
-use axum::http::{HeaderName, HeaderValue, StatusCode, header};
-use axum::response::Response;
-use axum::routing::{delete, get, post};
+use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri, header};
+use axum::response::{IntoResponse as _, Response};
+use axum::routing::{delete, get, patch, post};
 use sqlx::PgPool;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -25,6 +25,7 @@ use crate::error::{ApiError, Problem, problem_response};
 use crate::ingest::IngestLimiter;
 pub use crate::ingest::IngestLimits;
 use crate::routes;
+use crate::web::WebAssets;
 
 static REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
 
@@ -70,12 +71,27 @@ pub struct HttpLimits {
 }
 
 pub fn router(state: AppState, limits: HttpLimits) -> Router {
+    router_with_web(state, limits, None)
+}
+
+/// The API plus, when `web` is set, the UI on every other `GET` path (see [`crate::web`]).
+pub fn router_with_web(state: AppState, limits: HttpLimits, web: Option<Arc<WebAssets>>) -> Router {
     let api_v1 = Router::new()
         .route("/auth/login", post(routes::auth::login))
         .route("/auth/mfa/enroll", post(routes::auth::mfa_enroll))
         .route("/auth/mfa/verify", post(routes::auth::mfa_verify))
         .route("/auth/logout", post(routes::auth::logout))
         .route("/auth/me", get(routes::auth::me))
+        .route("/auth/password", post(routes::auth::change_password))
+        .route("/users", get(routes::users::list).post(routes::users::create))
+        .route("/users/{id}", patch(routes::users::update))
+        .route("/users/{id}/reset-mfa", post(routes::users::reset_mfa))
+        .route("/users/{id}/unlock", post(routes::users::unlock))
+        .route("/users/{id}/password", post(routes::users::reset_password))
+        .route("/audit", get(routes::audit::list))
+        .route("/audit/verify", get(routes::audit::verify))
+        .route("/overview", get(routes::overview::overview))
+        .route("/locations", get(routes::overview::locations))
         .route("/api-tokens", get(routes::api_tokens::list).post(routes::api_tokens::create))
         .route("/api-tokens/{id}", delete(routes::api_tokens::revoke))
         .route("/secrets", get(routes::secrets::list).post(routes::secrets::create))
@@ -105,7 +121,10 @@ pub fn router(state: AppState, limits: HttpLimits) -> Router {
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
         .nest("/api/v1", api_v1)
-        .fallback(|| async { ApiError::NotFound })
+        .fallback(move |method: Method, uri: Uri| {
+            let web = web.clone();
+            async move { web.and_then(|w| w.respond(&method, &uri)).unwrap_or_else(|| ApiError::NotFound.into_response()) }
+        })
         .with_state(state)
         .layer(
             // Listed outermost → innermost.
@@ -131,6 +150,23 @@ pub fn router(state: AppState, limits: HttpLimits) -> Router {
                 .layer(SetResponseHeaderLayer::overriding(
                     header::X_CONTENT_TYPE_OPTIONS,
                     HeaderValue::from_static("nosniff"),
+                ))
+                .layer(SetResponseHeaderLayer::if_not_present(
+                    header::CONTENT_SECURITY_POLICY,
+                    HeaderValue::from_static(crate::web::API_CSP),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY")))
+                .layer(SetResponseHeaderLayer::overriding(
+                    header::REFERRER_POLICY,
+                    HeaderValue::from_static("no-referrer"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("cross-origin-opener-policy"),
+                    HeaderValue::from_static("same-origin"),
+                ))
+                .layer(SetResponseHeaderLayer::overriding(
+                    HeaderName::from_static("permissions-policy"),
+                    HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
                 ))
                 .layer(SetResponseHeaderLayer::if_not_present(
                     header::CACHE_CONTROL,

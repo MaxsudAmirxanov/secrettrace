@@ -38,6 +38,7 @@ const SOURCE_KEYS: &[&str] = &[
 const SCAN_KEYS: &[&str] = &[
     "id",
     "source_id",
+    "source_name",
     "trigger",
     "status",
     "full_scan",

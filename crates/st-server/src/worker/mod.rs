@@ -516,7 +516,7 @@ impl Worker {
 
         // One job per mirror at a time, across workers sharing the data dir.
         let repos = prepare_repos_dir(&cfg.data_dir)?;
-        let _lock = lock_mirror(&repos.join(format!("{source_id}.lock")))?;
+        let _lock = acquire_mirror(&repos.join(format!("{source_id}.lock"))).await?;
         let mirror = repos.join(format!("{source_id}.git"));
 
         // Fetch, with the credential (if any) copied into a private dir removed right after.
@@ -707,6 +707,27 @@ impl Worker {
         audit::record(&mut tx, &event).await.map_err(|e| err(&e))?;
         tx.commit().await.map_err(|e| err(&e))?;
         Ok(stats)
+    }
+}
+
+/// Attempts and pause of [`acquire_mirror`]: about two seconds in total.
+const MIRROR_LOCK_ATTEMPTS: u32 = 20;
+const MIRROR_LOCK_PAUSE: Duration = Duration::from_millis(100);
+
+/// [`lock_mirror`], retried briefly. A `flock` belongs to the open file description, so a
+/// child process forked (by any thread of this process) while the previous holder still
+/// had the file open keeps the lock alive until that child calls `exec`. That window is
+/// short; without a retry it shows up as a spurious "mirror is busy" and a minute of backoff.
+async fn acquire_mirror(path: &Path) -> Result<std::fs::File, JobError> {
+    let mut attempt = 1;
+    loop {
+        match lock_mirror(path) {
+            Err(e) if e.message == "mirror is busy" && attempt < MIRROR_LOCK_ATTEMPTS => {
+                attempt += 1;
+                tokio::time::sleep(MIRROR_LOCK_PAUSE).await;
+            }
+            other => return other,
+        }
     }
 }
 

@@ -260,16 +260,37 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   у сервера (отдельная роль — позже); базовый образ не зафиксирован по digest; места воркера и CI одного
   URI — общие строки; остановка воркера возвращает попытку задаче.
 
-## 10. Ошибки API
+## 10. Веб-интерфейс
+
+SPA в `web/`, собирается в статические файлы; сервер раздаёт их из памяти (`ST_WEB_DIR`), отдельного
+процесса нет. Любой `GET` вне `/api/` и проб получает `index.html`; отсутствующий файл в `/assets/` — 404.
+
+- **API для интерфейса:** `GET /overview` (счётчики, тренд за 30 дней, топ и истекающие секреты),
+  `GET /locations` (все места с секретом в маскированном виде), `/users` (admin; нельзя менять себя,
+  админские изменения сериализуются `FOR UPDATE`, последний активный админ защищён), `POST /auth/password`
+  (неверный текущий пароль считается неудачным входом; остальные сессии завершаются), `GET /audit` и
+  `GET /audit/verify` (admin).
+- **Секреты в браузере:** нормализация, digest и hints портированы на TypeScript и проверяются на тех же
+  векторах, что и Rust. На сервер уходят только digest и hints; строки JS нельзя затереть, поэтому поле
+  очищается сразу после вычисления.
+- **Заголовки:** CSP `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;
+  connect-src 'self'; frame-ancestors 'none'`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`,
+  `Cross-Origin-Opener-Policy: same-origin`; API-ответы — `default-src 'none'`. Хешированные файлы
+  `/assets/*` кешируются навсегда, `index.html` — `no-cache`.
+- **Состояние:** cookie сессии `HttpOnly; SameSite=Strict`, CSRF-токен в памяти; браузерное хранилище —
+  только тема. Роли в интерфейсе скрывают недоступные действия, проверка — на сервере.
+- **Зависимости:** точные версии в `package-lock.json`, `npm audit` в CI; в рантайм-образ попадает только `dist`.
+
+## 11. Ошибки API
 
 `application/problem+json`, поле `type` — стабильный URN: `urn:secrettrace:problem:{bad-request|unauthorized|
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
-## 11. Схема БД
+## 12. Схема БД
 См. `migrations/0001_core.sql`, `0002_auth.sql`, `0003_ingest.sql` и `0004_worker.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
 `scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
 
-## 12. План MVP
+## 13. План MVP
 
 | # | Задача | Статус |
 |---|---|---|
@@ -285,7 +306,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 9 | Воркер: очередь, планировщик, клонирование по `credential_ref`; API источников и сканов | ✅ |
 | 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |
 | 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | |
-| 12 | Web UI (React + TS): логин и MFA, секреты, locations, алерты, источники | |
+| 12 | Web UI (React + TS): логин и MFA, обзор, находки, секреты, источники, сканы, токены, пользователи, аудит | ✅ |
 | 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | |
 | 14 | E2E в compose, threat model | |
 

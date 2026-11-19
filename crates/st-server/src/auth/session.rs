@@ -97,6 +97,16 @@ pub async fn delete_all_for_user(conn: &mut PgConnection, user_id: Uuid) -> Resu
     Ok(sqlx::query("DELETE FROM sessions WHERE user_id = $1").bind(user_id).execute(conn).await?.rows_affected())
 }
 
+/// End every session of the user except the one with `keep_hash` (password change).
+pub async fn delete_others(conn: &mut PgConnection, user_id: Uuid, keep_hash: &[u8]) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query("DELETE FROM sessions WHERE user_id = $1 AND token_hash <> $2")
+        .bind(user_id)
+        .bind(keep_hash)
+        .execute(conn)
+        .await?
+        .rows_affected())
+}
+
 pub async fn delete_expired(conn: &mut PgConnection) -> Result<u64, sqlx::Error> {
     Ok(sqlx::query("DELETE FROM sessions WHERE expires_at <= now()").execute(conn).await?.rows_affected())
 }

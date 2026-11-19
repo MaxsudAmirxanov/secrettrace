@@ -219,6 +219,8 @@ pub struct ScanRequest {
 pub struct ScanOut {
     pub id: Uuid,
     pub source_id: Option<Uuid>,
+    /// Name of the source (absent once the source is deleted).
+    pub source_name: Option<String>,
     pub trigger: ScanTrigger,
     pub status: JobStatus,
     /// Whole history (`true`) or only what is new since the last scan.
@@ -571,9 +573,9 @@ pub async fn delete(tx: &mut Transaction<'_, Postgres>, id: Uuid, audit_event: A
 // ── scan jobs ─────────────────────────────────────────────────────────────
 
 const SCAN_SELECT: &str =
-    "SELECT id, source_id, trigger, status, full_scan, attempts, requested_by, created_at, started_at,
-        finished_at, run_after, stats, error
-    FROM scan_jobs";
+    "SELECT j.id, j.source_id, src.name AS source_name, j.trigger, j.status, j.full_scan, j.attempts,
+        j.requested_by, j.created_at, j.started_at, j.finished_at, j.run_after, j.stats, j.error
+    FROM scan_jobs j LEFT JOIN sources src ON src.id = j.source_id";
 
 fn scan_from_row(row: &sqlx::postgres::PgRow) -> Result<ScanOut, sqlx::Error> {
     let trigger: String = row.try_get("trigger")?;
@@ -582,6 +584,7 @@ fn scan_from_row(row: &sqlx::postgres::PgRow) -> Result<ScanOut, sqlx::Error> {
     Ok(ScanOut {
         id: row.try_get("id")?,
         source_id: row.try_get("source_id")?,
+        source_name: row.try_get("source_name")?,
         trigger,
         status: row.try_get("status")?,
         full_scan: row.try_get("full_scan")?,
@@ -597,7 +600,7 @@ fn scan_from_row(row: &sqlx::postgres::PgRow) -> Result<ScanOut, sqlx::Error> {
 }
 
 pub async fn get_scan(conn: &mut PgConnection, id: Uuid) -> Result<Option<ScanOut>, sqlx::Error> {
-    let row = sqlx::query(&format!("{SCAN_SELECT} WHERE id = $1")).bind(id).fetch_optional(conn).await?;
+    let row = sqlx::query(&format!("{SCAN_SELECT} WHERE j.id = $1")).bind(id).fetch_optional(conn).await?;
     row.as_ref().map(scan_from_row).transpose()
 }
 
@@ -607,18 +610,18 @@ pub async fn list_scans(conn: &mut PgConnection, f: &ScanFilter) -> Result<Page<
     let mut qb: QueryBuilder<Postgres> = QueryBuilder::new(SCAN_SELECT);
     qb.push(" WHERE true");
     if let Some(s) = f.source_id {
-        qb.push(" AND source_id = ").push_bind(s);
+        qb.push(" AND j.source_id = ").push_bind(s);
     }
     if let Some(s) = f.status {
-        qb.push(" AND status = ").push_bind(s);
+        qb.push(" AND j.status = ").push_bind(s);
     }
     if let Some(t) = f.trigger {
-        qb.push(" AND trigger = ").push_bind(t.as_str());
+        qb.push(" AND j.trigger = ").push_bind(t.as_str());
     }
     if let Some(c) = cursor {
-        qb.push(" AND (created_at, id) < (").push_bind(c.created_at).push(", ").push_bind(c.id).push(")");
+        qb.push(" AND (j.created_at, j.id) < (").push_bind(c.created_at).push(", ").push_bind(c.id).push(")");
     }
-    qb.push(" ORDER BY created_at DESC, id DESC LIMIT ").push_bind(limit + 1);
+    qb.push(" ORDER BY j.created_at DESC, j.id DESC LIMIT ").push_bind(limit + 1);
     let rows = qb.build().fetch_all(conn).await?;
     let mut items = rows.iter().map(scan_from_row).collect::<Result<Vec<_>, _>>()?;
     let next_cursor = next_cursor(&mut items, limit, |s| Cursor { created_at: s.created_at, id: s.id });

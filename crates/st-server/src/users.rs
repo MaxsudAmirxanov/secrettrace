@@ -126,6 +126,12 @@ pub async fn reset_failures(conn: &mut PgConnection, id: Uuid) -> Result<(), sql
     Ok(())
 }
 
+/// Replace the password hash (a PHC string from `password::hash_blocking`).
+pub async fn set_password(conn: &mut PgConnection, id: Uuid, phc: &str) -> Result<(), sqlx::Error> {
+    sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1").bind(id).bind(phc).execute(conn).await?;
+    Ok(())
+}
+
 /// Remove the TOTP enrollment and all sessions (admin CLI `reset-mfa`).
 pub async fn reset_mfa(conn: &mut PgConnection, id: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE users SET totp_secret_enc = NULL, mfa_enabled = false, totp_last_step = NULL WHERE id = $1")

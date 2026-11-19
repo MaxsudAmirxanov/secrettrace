@@ -154,6 +154,168 @@
         ]
       }
     },
+    "/api/v1/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Browse the audit log, newest first.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "action",
+            "in": "query",
+            "description": "Exact action, or a prefix ending in `.` (e.g. `auth.`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "actor_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "target_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_AuditOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/audit/verify": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "Recompute the hash chain of the whole log.",
+        "operationId": "verify",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerifyOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/auth/login": {
       "post": {
         "tags": [
@@ -368,6 +530,66 @@
           },
           "409": {
             "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/password": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /auth/password` — change your own password. Other sessions are ended; this one\nstays. A wrong current password counts as a failed login (lockout applies).",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Password changed, other sessions ended"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Wrong current password or weak new password",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -741,6 +963,162 @@
         "security": [
           {
             "token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/locations": {
+      "get": {
+        "tags": [
+          "overview"
+        ],
+        "summary": "Every location of every secret, newest first sighting first.",
+        "operationId": "locations",
+        "parameters": [
+          {
+            "name": "is_allowed",
+            "in": "query",
+            "description": "`false`: violations only; `true`: allowed locations only.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "in_current_state",
+            "in": "query",
+            "description": "`true`: still present in the last full scan; `false`: only in history.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "secret_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "source_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "environment",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring of the URI or the path.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_FindingOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/overview": {
+      "get": {
+        "tags": [
+          "overview"
+        ],
+        "summary": "Dashboard: counters, the 30-day violation trend, top exposed and expiring secrets.",
+        "operationId": "overview",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Overview"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
           }
         ]
       }
@@ -1739,6 +2117,362 @@
         ]
       }
     },
+    "/api/v1/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "List users.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserOut"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Create a user with an initial password; TOTP enrollment happens at their first login.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Username taken",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Invalid username or weak password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Change a user's role or enable/disable the account.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Own account, or the last active admin",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}/password": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Set a new password for another user, unlock the account and end its sessions.",
+        "operationId": "reset_password",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordReset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Own account: use /auth/password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Weak password",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}/reset-mfa": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Remove the user's TOTP enrollment and end their sessions; they enroll again at next login.",
+        "operationId": "reset_mfa",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Own account",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/users/{id}/unlock": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Clear the failed-login counter and lock.",
+        "operationId": "unlock",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -1888,6 +2622,72 @@
           }
         }
       },
+      "AuditOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "ts",
+          "actor_type",
+          "actor_id",
+          "action",
+          "details"
+        ],
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "actor_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Username or token name of the actor, when it still exists."
+          },
+          "actor_type": {
+            "type": "string",
+            "description": "`user`, `token` or `system`."
+          },
+          "details": {
+            "type": "object",
+            "description": "Never contains secret values."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
       "CompletionStatus": {
         "type": "string",
         "enum": [
@@ -1958,6 +2758,23 @@
           }
         ]
       },
+      "DayCount": {
+        "type": "object",
+        "required": [
+          "day",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      },
       "Detector": {
         "type": "string",
         "description": "Detector that produced a candidate (mirrors `st_extract::Detector`).",
@@ -1993,6 +2810,38 @@
           },
           "secret": {
             "type": "string"
+          }
+        }
+      },
+      "ExpiringSecret": {
+        "type": "object",
+        "required": [
+          "secret",
+          "expires_at"
+        ],
+        "properties": {
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "secret": {
+            "$ref": "#/components/schemas/SecretRef"
+          }
+        }
+      },
+      "ExposedSecret": {
+        "type": "object",
+        "required": [
+          "secret",
+          "violations"
+        ],
+        "properties": {
+          "secret": {
+            "$ref": "#/components/schemas/SecretRef"
+          },
+          "violations": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -2076,6 +2925,72 @@
           }
         },
         "additionalProperties": false
+      },
+      "FindingOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "secret",
+          "source_type",
+          "uri",
+          "locator",
+          "in_current_state",
+          "is_allowed",
+          "first_seen",
+          "last_seen"
+        ],
+        "properties": {
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "in_current_state": {
+            "type": "boolean"
+          },
+          "is_allowed": {
+            "type": "boolean"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "locator": {
+            "type": "object",
+            "description": "`{path, line, column, commit, blob, ref, encoding}` — never file contents."
+          },
+          "secret": {
+            "$ref": "#/components/schemas/SecretRef"
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
       },
       "FindingsRequest": {
         "type": "object",
@@ -2169,6 +3084,41 @@
           "failed",
           "cancelled"
         ]
+      },
+      "LocationCounts": {
+        "type": "object",
+        "required": [
+          "total",
+          "open_violations",
+          "historical_violations",
+          "allowed",
+          "exposed_secrets"
+        ],
+        "properties": {
+          "allowed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "exposed_secrets": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Secrets with at least one violation."
+          },
+          "historical_violations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not allowed, seen only in history (still a leak: history is readable)."
+          },
+          "open_violations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Not allowed and still present in the current state of the source."
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "LocationOut": {
         "type": "object",
@@ -2324,6 +3274,238 @@
           }
         }
       },
+      "Overview": {
+        "type": "object",
+        "required": [
+          "secrets",
+          "locations",
+          "sources",
+          "scans_24h",
+          "violations_by_day",
+          "top_exposed",
+          "expiring",
+          "recent_violations",
+          "recent_scans"
+        ],
+        "properties": {
+          "expiring": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExpiringSecret"
+            },
+            "description": "Active secrets expiring soonest within 30 days (up to 5)."
+          },
+          "locations": {
+            "$ref": "#/components/schemas/LocationCounts"
+          },
+          "recent_scans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScanOut"
+            },
+            "description": "Newest scans (up to 6)."
+          },
+          "recent_violations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindingOut"
+            },
+            "description": "Newest violations (up to 8)."
+          },
+          "scans_24h": {
+            "$ref": "#/components/schemas/ScanCounts",
+            "description": "Scans created in the last 24 hours, by status."
+          },
+          "secrets": {
+            "$ref": "#/components/schemas/SecretCounts"
+          },
+          "sources": {
+            "$ref": "#/components/schemas/SourceCounts"
+          },
+          "top_exposed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExposedSecret"
+            },
+            "description": "Secrets with the most violations (up to 5)."
+          },
+          "violations_by_day": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DayCount"
+            },
+            "description": "New violations per day (UTC, by first sighting), oldest first, last 30 days."
+          }
+        }
+      },
+      "Page_AuditOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "ts",
+                "actor_type",
+                "actor_id",
+                "action",
+                "details"
+              ],
+              "properties": {
+                "action": {
+                  "type": "string"
+                },
+                "actor_id": {
+                  "type": "string"
+                },
+                "actor_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Username or token name of the actor, when it still exists."
+                },
+                "actor_type": {
+                  "type": "string",
+                  "description": "`user`, `token` or `system`."
+                },
+                "details": {
+                  "type": "object",
+                  "description": "Never contains secret values."
+                },
+                "id": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "ip": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "request_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "target_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "target_type": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "ts": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page; absent on the last page."
+          }
+        }
+      },
+      "Page_FindingOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "secret",
+                "source_type",
+                "uri",
+                "locator",
+                "in_current_state",
+                "is_allowed",
+                "first_seen",
+                "last_seen"
+              ],
+              "properties": {
+                "environment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "first_seen": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "in_current_state": {
+                  "type": "boolean"
+                },
+                "is_allowed": {
+                  "type": "boolean"
+                },
+                "last_seen": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "locator": {
+                  "type": "object",
+                  "description": "`{path, line, column, commit, blob, ref, encoding}` — never file contents."
+                },
+                "secret": {
+                  "$ref": "#/components/schemas/SecretRef"
+                },
+                "source_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "source_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "source_type": {
+                  "$ref": "#/components/schemas/SourceType"
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page; absent on the last page."
+          }
+        }
+      },
       "Page_LocationOut": {
         "type": "object",
         "required": [
@@ -2472,6 +3654,13 @@
                     "null"
                   ],
                   "format": "uuid"
+                },
+                "source_name": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Name of the source (absent once the source is deleted)."
                 },
                 "started_at": {
                   "type": [
@@ -2705,6 +3894,37 @@
           }
         }
       },
+      "PasswordChange": {
+        "type": "object",
+        "required": [
+          "current_password",
+          "new_password"
+        ],
+        "properties": {
+          "current_password": {
+            "type": "string",
+            "format": "password"
+          },
+          "new_password": {
+            "type": "string",
+            "format": "password"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PasswordReset": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "format": "password"
+          }
+        },
+        "additionalProperties": false
+      },
       "Problem": {
         "type": "object",
         "description": "RFC 7807 problem details.",
@@ -2795,6 +4015,38 @@
           }
         }
       },
+      "ScanCounts": {
+        "type": "object",
+        "required": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ],
+        "properties": {
+          "cancelled": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "queued": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "running": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "succeeded": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "ScanLimits": {
         "type": "object",
         "required": [
@@ -2880,6 +4132,13 @@
             ],
             "format": "uuid"
           },
+          "source_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the source (absent once the source is deleted)."
+          },
           "started_at": {
             "type": [
               "string",
@@ -2963,6 +4222,44 @@
           "ci",
           "agent"
         ]
+      },
+      "SecretCounts": {
+        "type": "object",
+        "required": [
+          "total",
+          "active",
+          "expired",
+          "revoked",
+          "rotated",
+          "expiring_soon"
+        ],
+        "properties": {
+          "active": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expired": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "expiring_soon": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Active secrets whose `expires_at` is within the next 30 days."
+          },
+          "revoked": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rotated": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "SecretCreate": {
         "type": "object",
@@ -3106,6 +4403,36 @@
           }
         }
       },
+      "SecretRef": {
+        "type": "object",
+        "description": "The secret a finding belongs to, as the UI shows it.",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "status",
+          "masked"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "masked": {
+            "type": "string",
+            "description": "Built from stored hints only."
+          },
+          "name": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/SecretStatus"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SecretType"
+          }
+        }
+      },
       "SecretStatus": {
         "type": "string",
         "enum": [
@@ -3201,6 +4528,28 @@
           }
         },
         "additionalProperties": false
+      },
+      "SourceCounts": {
+        "type": "object",
+        "required": [
+          "total",
+          "enabled",
+          "scheduled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "scheduled": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
       },
       "SourceCreate": {
         "type": "object",
@@ -3487,6 +4836,148 @@
           "automation"
         ]
       },
+      "UserCreate": {
+        "type": "object",
+        "required": [
+          "username",
+          "role",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "format": "password",
+            "description": "Initial password (at least 12 characters). TOTP is enrolled at first login."
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string",
+            "example": "alice",
+            "pattern": "^[A-Za-z0-9._@-]{1,64}$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "UserOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "username",
+          "role",
+          "mfa_enabled",
+          "is_active",
+          "is_locked",
+          "failed_logins",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "failed_logins": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_active": {
+            "type": "boolean"
+          },
+          "is_locked": {
+            "type": "boolean",
+            "description": "Temporarily locked after repeated failed logins."
+          },
+          "last_login_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "locked_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "mfa_enabled": {
+            "type": "boolean",
+            "description": "TOTP enrolled. Until then the user enrolls at the next login."
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "UserUpdate": {
+        "type": "object",
+        "properties": {
+          "is_active": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`false` disables the account and ends its sessions."
+          },
+          "role": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Role"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "VerifyOut": {
+        "type": "object",
+        "required": [
+          "ok",
+          "rows"
+        ],
+        "properties": {
+          "broken_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "head": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hash of the newest row (hex); keep a copy out of band to detect tail truncation."
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rows": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "VerifyRequest": {
         "type": "object",
         "required": [
@@ -3546,6 +5037,18 @@
     {
       "name": "scans",
       "description": "Scan jobs: server-side (manual, scheduled) and reported by API tokens"
+    },
+    {
+      "name": "overview",
+      "description": "Dashboard numbers and the list of all findings"
+    },
+    {
+      "name": "users",
+      "description": "User administration (admin)"
+    },
+    {
+      "name": "audit",
+      "description": "Audit log and hash-chain verification (admin)"
     },
     {
       "name": "health",

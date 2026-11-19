@@ -4,7 +4,7 @@ WORKER_DIR := deploy/worker
 TEST_PG := secrettrace-test-pg
 TEST_DB_URL := postgres://postgres:test@127.0.0.1:54329/secrettrace
 
-.PHONY: help secrets up down logs build admin test test-unit test-db db-up db-down lint fmt audit
+.PHONY: help secrets up down logs build admin test test-unit test-db db-up db-down lint fmt audit web-install web-dev web-test web-build web-lint
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -76,3 +76,19 @@ fmt: ## Format code
 
 audit: ## Check dependencies for known vulnerabilities (needs cargo-audit)
 	cargo audit
+	cd web && npm audit --omit=dev
+
+web-install: ## Install web UI dependencies (exact versions from package-lock.json)
+	cd web && npm ci --no-fund
+
+web-dev: ## Web UI dev server on :5173, proxies /api to ST_API_URL (default 127.0.0.1:8080)
+	cd web && npm run dev
+
+web-test: ## Web UI: unit/component tests (vitest)
+	cd web && npm test
+
+web-lint: ## Web UI: eslint + TypeScript
+	cd web && npm run lint && npm run typecheck
+
+web-build: ## Build the web UI into web/dist (served by `serve` with ST_WEB_DIR=web/dist)
+	cd web && npm run build

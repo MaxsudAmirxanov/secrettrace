@@ -1,0 +1,8 @@
+/target
+.env
+*.pem
+*.key
+*.p12
+deploy/secrets/*
+!deploy/secrets/.gitkeep
+deploy/pki/out/

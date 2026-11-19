@@ -1,0 +1,79 @@
+# SecretTrace — MVP deployment.
+# Prerequisite: `make secrets` (creates deploy/secrets/*; never committed).
+# TLS / mTLS edge (nginx) is added in a later stage; until then the API is bound to localhost only.
+name: secrettrace
+
+x-server-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: secrettrace
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      ST_OWNER_DB_PASSWORD_FILE: /run/secrets/owner_db_password
+      ST_APP_DB_PASSWORD_FILE: /run/secrets/app_db_password
+    secrets: [postgres_password, owner_db_password, app_db_password]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d secrettrace"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [backend]
+    restart: unless-stopped
+
+  migrate:
+    <<: *hardening
+    build: .
+    image: secrettrace-server:dev
+    command: ["migrate"]
+    environment:
+      ST_DATABASE_URL_FILE: /run/secrets/app_database_url
+      ST_MIGRATION_DATABASE_URL_FILE: /run/secrets/owner_database_url
+      ST_PEPPER_KEYS_FILE: /run/secrets/pepper_keys
+      ST_DATA_KEY_FILE: /run/secrets/data_key
+    secrets: [app_database_url, owner_database_url, pepper_keys, data_key]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [backend]
+    restart: "no"
+
+  server:
+    <<: *hardening
+    image: secrettrace-server:dev
+    command: ["serve"]
+    environment:
+      ST_DATABASE_URL_FILE: /run/secrets/app_database_url
+      ST_PEPPER_KEYS_FILE: /run/secrets/pepper_keys
+      ST_DATA_KEY_FILE: /run/secrets/data_key
+      ST_LOG_FORMAT: json
+      # Secure cookies (`__Host-` prefix). Browsers accept them on http://localhost;
+      # everywhere else the TLS edge (nginx, later stage) is required.
+      ST_COOKIE_SECURE: "true"
+    secrets: [app_database_url, pepper_keys, data_key]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    ports: ["127.0.0.1:8080:8080"]
+    networks: [backend]
+    restart: unless-stopped
+
+secrets:
+  postgres_password:  { file: ./deploy/secrets/postgres_password }
+  owner_db_password:  { file: ./deploy/secrets/owner_db_password }
+  app_db_password:    { file: ./deploy/secrets/app_db_password }
+  owner_database_url: { file: ./deploy/secrets/owner_database_url }
+  app_database_url:   { file: ./deploy/secrets/app_database_url }
+  pepper_keys:        { file: ./deploy/secrets/pepper_keys }
+  data_key:           { file: ./deploy/secrets/data_key }
+
+volumes:
+  pgdata:
+
+networks:
+  backend:

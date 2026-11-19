@@ -1,0 +1,48 @@
+[package]
+name = "st-server"
+description = "SecretTrace API server, background worker and admin commands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "secrettrace-server"
+path = "src/main.rs"
+
+[dependencies]
+st-core = { workspace = true, features = ["sqlx", "openapi"] }
+
+aes-gcm.workspace = true
+anyhow.workspace = true
+argon2.workspace = true
+axum.workspace = true
+base64.workspace = true
+chrono.workspace = true
+clap.workspace = true
+hex.workspace = true
+hmac.workspace = true
+rand.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+rpassword.workspace = true
+serde_json.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+sqlx.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tower-http = { workspace = true, features = ["set-header"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+utoipa.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+
+[lints]
+workspace = true

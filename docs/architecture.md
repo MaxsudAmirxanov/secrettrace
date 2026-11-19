@@ -1,0 +1,129 @@
+# SecretTrace — архитектура
+
+Защитный инструмент класса secrets governance / DLP / honeytokens. Работает только в инфраструктуре владельца:
+секреты регистрируются по отпечатку, сканеры находят, куда они попали, коллекторы — кто ими пользуется.
+
+## 1. Отпечатки: как найти секрет, не храня его
+
+```
+клиент (браузер / CLI / агент)                       сервер
+canonical = normalize(type, value)
+d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA256(pepper_v, "secrettrace/fp/v1\0" || d)
+                                                          lookup (pepper_version, fp) в secrets
+```
+
+- **Открытое значение не покидает клиента.** Регистрация идёт через `secrettrace digest` или WebCrypto в браузере.
+- **Pepper есть только на сервере** (Docker secret / env; позже Vault Transit). Дамп БД без pepper бесполезен для перебора.
+  Pepper не раздаётся агентам: иначе взлом любого хоста вместе с дампом БД дал бы офлайн-перебор слабых паролей.
+- **Остаточный риск:** digest слабого пароля можно подобрать. Поэтому transport только TLS/mTLS, тела `/ingest` не
+  логируются, на `/ingest/match` стоят rate-limit и аудит (иначе это оракул «зарегистрирован ли пароль X»).
+- **Версии pepper.** Пересчитать старые отпечатки без значения нельзя, поэтому новые секреты получают текущую версию,
+  а матчинг проверяет все настроенные версии. Старая версия уходит вместе с ротацией самих секретов.
+- **Нормализация** (`st-core::normalize`): trim; PEM сводится к base64-телу (переносы, `\r\n` и экранированные `\n`
+  не важны); публичный ключ OpenSSH — к blob'у; многострочные значения разрешены только для ключевого материала.
+- **Политика hints** (`st-core::hints`): префикс хранится, только если это публичный вендорский префикс из списка
+  (`AKIA`, `ghp_`, `sk_live_`…), длина — только вместе с ним, суффикс из 4 символов — только при длине ≥ 24.
+  У паролей и строк подключения подсказок нет никогда; это дополнительно гарантирует CHECK в БД.
+- **Двухфазный ingest.** `/match` получает дедуплицированные digest'ы и возвращает совпавшие, `/findings` получает
+  расположения только для совпадений. Сервер перепроверяет digest и не доверяет клиенту.
+
+## 2. Компоненты
+
+```
+            ┌──────────── nginx (edge, этап 13) ───┐
+ браузер ──▶│ :443  TLS → web (static) + /api      │
+ агент/CI ─▶│ :8443 mTLS → /api/v1/ingest          │
+            └───────────────┬──────────────────────┘
+                            ▼
+      secrettrace-server serve  ◀── Postgres 17 ──▶  secrettrace-server worker (этап 9)
+      (axum)                       реестр, locations,  очередь SKIP LOCKED, outbox алертов,
+                                   алерты, аудит       cron истечения сроков
+```
+
+| Крейт | Назначение |
+|---|---|
+| `st-core` | нормализация, digest, hints, маскирование; без сети и без pepper |
+| `st-server` | API, воркер, админ-команды (`migrate`, `verify-audit`, `gen-pepper`) |
+| `st-cli` | `secrettrace`: digest сейчас; `register`, `scan git/fs` для CI позже |
+
+Очередь в MVP — сам Postgres (`FOR UPDATE SKIP LOCKED` + outbox). NATS JetStream появится на этапе 2 для
+потоковых коллекторов. События использования будут лежать в партиционированной таблице (TimescaleDB при росте).
+
+## 3. Безопасность самой системы
+
+- Две роли БД: `st_owner` (только миграции) и `st_app` (рантайм). У `st_app` отозваны `UPDATE/DELETE/TRUNCATE`
+  на `audit_log` и доступ к `_sqlx_migrations`. Это проверяется тестом.
+- Журнал аудита — hash-chain: `hash = SHA-256(domain || prev_hash || length-prefixed поля)`, вставки сериализованы
+  advisory-lock'ом в транзакции действия. `secrettrace-server verify-audit` пересчитывает всю цепочку.
+  Ограничение: удаление хвоста цепочки не обнаруживается; планируется периодический экспорт head-хеша.
+- Секреты в коде типизированы: `SecretString`, `Zeroizing`, `Digest`/`Fingerprint` с урезанным `Debug`.
+  HTTP-трейсинг пишет только метод и путь, без query и заголовков. Ошибки — RFC 7807 без внутренних деталей.
+- Контейнеры: distroless nonroot, read-only FS, `cap_drop: ALL`, `no-new-privileges`, все секреты — Docker secrets.
+- CI: rustfmt, clippy pedantic с `-D warnings`, тесты на Postgres, `cargo audit`, gitleaks по всей истории.
+
+## 4. Авторизация
+
+- **Пароли:** argon2id (m=19 МиБ, t=2, p=1), минимум 12 символов, максимум 256 байт. Для несуществующих
+  пользователей хеш всё равно вычисляется, чтобы по времени ответа нельзя было узнать, есть ли учётная запись.
+- **Вход в два шага:** пароль даёт pre-MFA сессию на 5 минут, TOTP (RFC 6238, SHA1/30 с/6 цифр, допуск ±1 шаг)
+  даёт новую сессию: токен меняется, это защита от session fixation. MFA обязательна для всех ролей.
+  Первая привязка TOTP происходит при первом входе; повторная — только после `reset-mfa` администратором.
+- **TOTP seed** хранится зашифрованным AES-256-GCM (`ST_DATA_KEY`), id пользователя служит associated data.
+  Номер последнего принятого шага (`totp_last_step`) запрещает повторное использование кода.
+- **Сессии:** в cookie лежит случайный токен (256 бит), в БД — его SHA-256. Cookie `HttpOnly; SameSite=Strict`,
+  в production `Secure` и префикс `__Host-`. Абсолютный срок жизни 12 ч, тайм-аут бездействия 30 мин.
+- **CSRF:** `X-CSRF-Token = base64url(SHA-256(domain || session_token))`. Токен вычисляется из cookie и нигде
+  не хранится; обязателен для всех методов, кроме GET/HEAD/OPTIONS.
+- **Перебор:** 5 неудачных попыток (пароль или TOTP) блокируют учётную запись на 15 минут; активная блокировка
+  не продлевается, чтобы атакующий не мог держать её вечно. Дополнительно in-process лимиты: 20 входов
+  в минуту с IP, 10 на имя пользователя, 5 проверок TOTP. Все неудачи дают одинаковый 401, причина — в аудите.
+  Введённое имя несуществующего пользователя в аудит не пишется: туда часто по ошибке вводят пароль.
+- **Роли:** `viewer < operator < admin`, проверка `CurrentUser::require(role)` в каждом обработчике.
+- **API-токены** (`stk_<id>_<секрет>`) только для машин: scopes `ingest:*`, обязательный срок жизни
+  (до 365 дней), хранится SHA-256, отзыв действует сразу. Привязка к CN клиентского сертификата mTLS — этап 13.
+- **IP клиента** берётся из адреса соединения; `X-Forwarded-For` учитывается только от `ST_TRUSTED_PROXIES`.
+
+## 5. Реестр
+
+- Регистрация принимает только digest. Сервер вычисляет отпечаток текущей версией pepper; дубликат ищется
+  по отпечаткам всех настроенных версий (`UNNEST` по парам версия/отпечаток).
+- Hints повторно проверяются на сервере (`st_core::validate_hints`); БД дополнительно запрещает их CHECK'ами.
+- Allow-rules проверяются при сохранении (`policy::Glob`: линейный DP без регулярных выражений и без
+  экспоненциального перебора). Сопоставление найденных мест с правилами выполняется на этапе 8.
+- Списки используют курсорную пагинацию по `(created_at, id)`: стабильно при вставках, без OFFSET.
+- Аудит: `secret.create`, `secret.update`, `secret.revoke`, `secret.rotate`, `secret.status_change`;
+  в деталях — имя, тип, маска и список изменённых полей, без digest и отпечатков.
+- Экстракторы `ApiJson` / `ApiQuery` / `ApiPath` превращают любые ошибки разбора в problem+json:
+  400 — синтаксис, 415 — тип содержимого, 422 — схема, 413 — размер.
+
+## 6. Ошибки API
+
+`application/problem+json`, поле `type` — стабильный URN: `urn:secrettrace:problem:{bad-request|unauthorized|
+forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
+
+## 7. Схема БД
+См. `migrations/0001_core.sql` и `0002_auth.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
+`scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
+
+## 8. План MVP
+
+| # | Задача | Статус |
+|---|---|---|
+| 0 | Каркас workspace, CI, compose | ✅ |
+| 1 | Конфиг (env + `_FILE`), логирование, ошибки RFC 7807, request-id | ✅ |
+| 2 | Миграция 0001, роли БД, аудит с hash-chain + `verify-audit` | ✅ |
+| 3 | `st-core`: normalize/digest/hints/mask + тест-векторы; pepper и fingerprint на сервере | ✅ |
+| 4 | Auth: argon2id, сессии, обязательный TOTP, CSRF, lockout, API-токены, RBAC, `create-user` | ✅ |
+| 5 | API реестра секретов + allow-rules + аудит, OpenAPI (utoipa) | ✅ |
+| 6 | Извлечение кандидатов: known formats, kv, URL userinfo, PEM, high-entropy; декодеры base64/url/json | |
+| 7 | Источники-плагины: filesystem, git (уникальные blob'ы + `--find-object`) | |
+| 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | |
+| 9 | Воркер: очередь, планировщик, клонирование по `credential_ref` | |
+| 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |
+| 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | |
+| 12 | Web UI (React + TS): логин и MFA, секреты, locations, алерты, источники | |
+| 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | |
+| 14 | E2E в compose, threat model | |
+
+Этапы после MVP: коллекторы (Vault audit, CloudTrail, auth.log, SDK) и граф (Cytoscape.js); canary-токены
+с trigger-сервером; политики и аномалии; ротация через Vault и AWS IAM.

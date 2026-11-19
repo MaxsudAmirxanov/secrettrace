@@ -1,0 +1,14 @@
+# SecretTrace contains synthetic credentials as test fixtures (normalization,
+# hint policy, digest vectors). They are not real; everything else is scanned.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Synthetic test fixtures"
+paths = [
+  '''^testdata/''',
+  '''^crates/st-core/src/(normalize|hints|digest|masking)\.rs$''',
+  '''^crates/st-core/tests/''',
+  '''^crates/st-server/src/(config|crypto/pepper)\.rs$''',
+  '''^crates/st-server/tests/''',
+]

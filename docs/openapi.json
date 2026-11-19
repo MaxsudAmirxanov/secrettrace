@@ -1,0 +1,1670 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "SecretTrace API",
+    "description": "Secrets lifecycle tracking. Plaintext secret values never reach this API: clients send `SHA-256(\"secrettrace/v1\\0\" || normalize(value))`.",
+    "license": {
+      "name": "Proprietary"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/api-tokens": {
+      "get": {
+        "tags": [
+          "api-tokens"
+        ],
+        "summary": "List API tokens (never includes token values).",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenInfo"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "api-tokens"
+        ],
+        "summary": "Issue a token for an agent or CI. The value is returned once.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTokenRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/api-tokens/{id}": {
+      "delete": {
+        "tags": [
+          "api-tokens"
+        ],
+        "summary": "Revoke a token immediately.",
+        "operationId": "revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/login": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /auth/login` — step 1: password. Issues a 5-minute pre-MFA session.",
+        "operationId": "login",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password accepted; pre-MFA session cookie set",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/auth/logout": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /auth/logout` — works for pre-MFA and full sessions.",
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "Session deleted, cookie cleared"
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/me": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`GET /auth/me` — current user and the CSRF token for this session (lets the SPA\nrecover the token after a page reload).",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/mfa/enroll": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /auth/mfa/enroll` — first login only: create a TOTP seed (stored encrypted,\nactivated by the first successful `verify`). Re-enrollment requires an admin reset.",
+        "operationId": "mfa_enroll",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Already enrolled",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/auth/mfa/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "`POST /auth/mfa/verify` — step 2: TOTP. On success the pre-MFA session is replaced\nby a fresh full session (new token, new CSRF token).",
+        "operationId": "mfa_verify",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Full session cookie set (token rotated)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/secrets": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "List registered secrets.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SecretStatus"
+            }
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SecretType"
+            }
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Case-insensitive substring of name, owner or purpose.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_SecretOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Register a secret by its client-side digest.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Name taken or value already registered",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/secrets/{id}": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Get one secret.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Update metadata, status, expiry or allow-rules. Revoked/rotated secrets cannot be reactivated.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Status transition not allowed",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/secrets/{id}/locations": {
+      "get": {
+        "tags": [
+          "secrets"
+        ],
+        "summary": "Where the secret has been found.",
+        "operationId": "locations",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "is_allowed",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_LocationOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Liveness: the process is up and serving.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Alive"
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Readiness: dependencies (database) are reachable.",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Ready"
+          },
+          "503": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AllowRuleIn": {
+        "type": "object",
+        "description": "Where a secret is allowed to appear. All set fields must match.",
+        "required": [
+          "uri_pattern"
+        ],
+        "properties": {
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "prod"
+          },
+          "path_pattern": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Glob over the path inside the source.",
+            "example": "k8s/sealed/**"
+          },
+          "source_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceType",
+                "description": "Restrict to one source type; omit for any."
+              }
+            ]
+          },
+          "uri_pattern": {
+            "type": "string",
+            "description": "Glob over the source URI (repo URL, `host:<name>`, …). `*` stops at `/`, `**` does not.",
+            "example": "git@github.com:acme/infra-secrets.git"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AllowRuleOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "uri_pattern"
+        ],
+        "properties": {
+          "comment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "path_pattern": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceType"
+              }
+            ]
+          },
+          "uri_pattern": {
+            "type": "string"
+          }
+        }
+      },
+      "CreateTokenRequest": {
+        "type": "object",
+        "required": [
+          "name",
+          "kind",
+          "scopes",
+          "expires_in_days"
+        ],
+        "properties": {
+          "expires_in_days": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Days until expiry (1..=365). Tokens always expire.",
+            "maximum": 365,
+            "minimum": 1
+          },
+          "kind": {
+            "$ref": "#/components/schemas/TokenKind"
+          },
+          "name": {
+            "type": "string"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "ingest:profile",
+              "ingest:match",
+              "ingest:findings"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreatedToken": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/TokenInfo"
+          },
+          {
+            "type": "object",
+            "required": [
+              "token"
+            ],
+            "properties": {
+              "token": {
+                "type": "string",
+                "description": "Shown exactly once; only its hash is stored."
+              }
+            }
+          }
+        ]
+      },
+      "EnrollResponse": {
+        "type": "object",
+        "required": [
+          "otpauth_uri",
+          "secret"
+        ],
+        "properties": {
+          "otpauth_uri": {
+            "type": "string"
+          },
+          "secret": {
+            "type": "string"
+          }
+        }
+      },
+      "Hints": {
+        "type": "object",
+        "properties": {
+          "length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "prefix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "suffix": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "LocationOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "secret_id",
+          "source_type",
+          "uri",
+          "locator",
+          "in_current_state",
+          "is_allowed",
+          "first_seen",
+          "last_seen"
+        ],
+        "properties": {
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "first_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "in_current_state": {
+            "type": "boolean"
+          },
+          "is_allowed": {
+            "type": "boolean"
+          },
+          "last_seen": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "locator": {
+            "type": "object",
+            "description": "`{path, line, column, commit, blob, ref, encoding}` — never file contents."
+          },
+          "secret_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "source_type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "format": "password"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "LoginResponse": {
+        "type": "object",
+        "required": [
+          "mfa_required",
+          "mfa_enrolled",
+          "csrf_token"
+        ],
+        "properties": {
+          "csrf_token": {
+            "type": "string"
+          },
+          "mfa_enrolled": {
+            "type": "boolean"
+          },
+          "mfa_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "MeResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "username",
+          "role",
+          "csrf_token"
+        ],
+        "properties": {
+          "csrf_token": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "Page_LocationOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "secret_id",
+                "source_type",
+                "uri",
+                "locator",
+                "in_current_state",
+                "is_allowed",
+                "first_seen",
+                "last_seen"
+              ],
+              "properties": {
+                "environment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "first_seen": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "in_current_state": {
+                  "type": "boolean"
+                },
+                "is_allowed": {
+                  "type": "boolean"
+                },
+                "last_seen": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "locator": {
+                  "type": "object",
+                  "description": "`{path, line, column, commit, blob, ref, encoding}` — never file contents."
+                },
+                "secret_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "source_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "source_type": {
+                  "$ref": "#/components/schemas/SourceType"
+                },
+                "uri": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page; absent on the last page."
+          }
+        }
+      },
+      "Page_SecretOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "type",
+                "owner",
+                "masked",
+                "status",
+                "is_expired",
+                "allow_rules",
+                "location_count",
+                "violation_count",
+                "created_at",
+                "updated_at"
+              ],
+              "properties": {
+                "allow_rules": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AllowRuleOut"
+                  }
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "created_by": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "expires_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "is_expired": {
+                  "type": "boolean",
+                  "description": "`true` when `expires_at` has passed (even before the expiry job flips `status`)."
+                },
+                "location_count": {
+                  "type": "integer",
+                  "format": "int64"
+                },
+                "masked": {
+                  "type": "string",
+                  "description": "Built from stored hints only, e.g. `AKIA…` or `••••••••`.",
+                  "example": "AKIA…"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "owner": {
+                  "type": "string"
+                },
+                "purpose": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "status": {
+                  "$ref": "#/components/schemas/SecretStatus"
+                },
+                "type": {
+                  "$ref": "#/components/schemas/SecretType"
+                },
+                "updated_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "violation_count": {
+                  "type": "integer",
+                  "format": "int64"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page; absent on the last page."
+          }
+        }
+      },
+      "Problem": {
+        "type": "object",
+        "description": "RFC 7807 problem details.",
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "title": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "example": "urn:secrettrace:problem:not-found"
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "description": "Role of a human user. Declaration order defines privilege: `Viewer < Operator < Admin`.",
+        "enum": [
+          "viewer",
+          "operator",
+          "admin"
+        ]
+      },
+      "SecretCreate": {
+        "type": "object",
+        "description": "Registration request. `digest` is computed client-side (`secrettrace digest`\nor the web UI); the plaintext value is never sent.",
+        "required": [
+          "name",
+          "type",
+          "owner",
+          "digest"
+        ],
+        "properties": {
+          "allow_rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AllowRuleIn"
+            }
+          },
+          "digest": {
+            "type": "string",
+            "description": "`SHA-256(\"secrettrace/v1\\0\" || normalize(value))`, lowercase hex.",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "hints": {
+            "$ref": "#/components/schemas/Hints"
+          },
+          "name": {
+            "type": "string",
+            "example": "prod-aws-deploy-key",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "owner": {
+            "type": "string",
+            "example": "platform-team",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 2000
+          },
+          "type": {
+            "$ref": "#/components/schemas/SecretType"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SecretOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "owner",
+          "masked",
+          "status",
+          "is_expired",
+          "allow_rules",
+          "location_count",
+          "violation_count",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "allow_rules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AllowRuleOut"
+            }
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "created_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "is_expired": {
+            "type": "boolean",
+            "description": "`true` when `expires_at` has passed (even before the expiry job flips `status`)."
+          },
+          "location_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "masked": {
+            "type": "string",
+            "description": "Built from stored hints only, e.g. `AKIA…` or `••••••••`.",
+            "example": "AKIA…"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": "string"
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/SecretStatus"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SecretType"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "violation_count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "SecretStatus": {
+        "type": "string",
+        "enum": [
+          "active",
+          "expired",
+          "revoked",
+          "rotated"
+        ]
+      },
+      "SecretType": {
+        "type": "string",
+        "description": "Kind of a registered secret. Mirrors the `secret_type` Postgres ENUM.",
+        "enum": [
+          "api_key",
+          "password",
+          "token",
+          "certificate",
+          "private_key",
+          "ssh_key",
+          "db_connection_string",
+          "other"
+        ]
+      },
+      "SecretUpdate": {
+        "type": "object",
+        "description": "Partial update. Absent fields are unchanged; `null` clears nullable fields.\n`allow_rules`, when present, replaces the whole set.",
+        "properties": {
+          "allow_rules": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/AllowRuleIn"
+            }
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "purpose": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SecretStatus"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SourceType": {
+        "type": "string",
+        "enum": [
+          "git_repo",
+          "filesystem",
+          "docker_image",
+          "k8s",
+          "ci_log",
+          "app_log",
+          "wiki"
+        ]
+      },
+      "TokenInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "token_prefix",
+          "scopes",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "revoked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "scopes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "token_prefix": {
+            "type": "string"
+          }
+        }
+      },
+      "TokenKind": {
+        "type": "string",
+        "enum": [
+          "agent",
+          "ci",
+          "automation"
+        ]
+      },
+      "VerifyRequest": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "example": "123456"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "csrf": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-CSRF-Token",
+        "description": "Required on POST/PATCH/DELETE with a session; returned by login, verify and /auth/me"
+      },
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-st_session",
+        "description": "Session cookie (`st_session` when ST_COOKIE_SECURE=false)"
+      },
+      "token": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "stk_<id>_<secret>",
+        "description": "API token for agents and CI"
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "auth",
+      "description": "Password + mandatory TOTP login, sessions"
+    },
+    {
+      "name": "secrets",
+      "description": "Registry of tracked secrets"
+    },
+    {
+      "name": "api-tokens",
+      "description": "Machine credentials for agents and CI (admin)"
+    },
+    {
+      "name": "health",
+      "description": "Liveness and readiness probes"
+    }
+  ]
+}

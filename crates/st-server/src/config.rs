@@ -5,6 +5,7 @@
 //! wrapped in [`SecretString`], whose `Debug` output is redacted.
 
 use std::net::{IpAddr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,6 +14,7 @@ use secrecy::SecretString;
 use crate::auth::AuthSettings;
 use crate::crypto::aead::{AeadError, DataKey};
 use crate::crypto::pepper::{Pepper, PepperError};
+use crate::worker::WorkerConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
@@ -88,16 +90,7 @@ impl Config {
                 totp_issuer: env.get("ST_TOTP_ISSUER").unwrap_or_else(|| "SecretTrace".into()),
                 trusted_proxies: env.ip_list("ST_TRUSTED_PROXIES")?,
             },
-            log_format: match env.get("ST_LOG_FORMAT").as_deref() {
-                None | Some("json") => LogFormat::Json,
-                Some("pretty") => LogFormat::Pretty,
-                Some(other) => {
-                    return Err(ConfigError::Invalid {
-                        var: "ST_LOG_FORMAT",
-                        reason: format!("expected json|pretty, got {other:?}"),
-                    });
-                }
-            },
+            log_format: env.log_format()?,
             request_timeout: Duration::from_secs(env.parse_or("ST_REQUEST_TIMEOUT_SECS", 30)?),
             max_body_bytes: env.parse_or("ST_MAX_BODY_BYTES", 1024 * 1024)?,
             ingest_digests_per_hour: match env.parse_or("ST_INGEST_DIGESTS_PER_HOUR", 200_000u32)? {
@@ -111,6 +104,96 @@ impl Config {
             },
         })
     }
+}
+
+/// Configuration of `secrettrace-server worker`: database, pepper and the worker settings.
+/// No `ST_DATA_KEY`: the worker never touches TOTP seeds (least privilege).
+#[derive(Debug)]
+pub struct WorkerSettings {
+    pub database_url: SecretString,
+    pub db_max_connections: u32,
+    pub pepper: Pepper,
+    pub log_format: LogFormat,
+    pub worker: WorkerConfig,
+}
+
+impl WorkerSettings {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let env = Env { lookup: &lookup };
+        let pepper_keys = env.secret("ST_PEPPER_KEYS")?.ok_or(ConfigError::Missing("ST_PEPPER_KEYS"))?;
+        Ok(Self {
+            database_url: env.secret("ST_DATABASE_URL")?.ok_or(ConfigError::Missing("ST_DATABASE_URL"))?,
+            db_max_connections: env.parse_or("ST_DB_MAX_CONNECTIONS", 5)?,
+            pepper: Pepper::parse(&pepper_keys, env.parse_opt::<u16>("ST_PEPPER_CURRENT")?)?,
+            log_format: env.log_format()?,
+            worker: WorkerConfig::from_lookup(&lookup)?,
+        })
+    }
+}
+
+impl WorkerConfig {
+    /// `ST_WORKER_*` variables over [`WorkerConfig::new`] defaults.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, ConfigError> {
+        let env = Env { lookup: &lookup };
+        let path = |var: &str, default: &str| PathBuf::from(env.get(var).unwrap_or_else(|| default.to_owned()));
+        let mut c = Self::new(
+            path("ST_WORKER_DATA_DIR", "/var/lib/secrettrace/worker"),
+            path("ST_WORKER_CREDENTIALS_DIR", "/run/git-credentials"),
+        );
+        if let Some(id) = env.get("ST_WORKER_ID") {
+            let ok = id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+            if !ok {
+                return Err(invalid("ST_WORKER_ID", "must be 1-64 chars of [A-Za-z0-9._-]"));
+            }
+            c.worker_id = id;
+        }
+        if let Some(dir) = env.get("ST_WORKER_TMP_DIR") {
+            c.tmp_dir = PathBuf::from(dir);
+        }
+        c.ssh_known_hosts = env.get("ST_WORKER_SSH_KNOWN_HOSTS").map(PathBuf::from);
+        c.concurrency = env.bounded("ST_WORKER_CONCURRENCY", c.concurrency.get(), 1..=16)?;
+        c.scan_threads = env.bounded("ST_WORKER_SCAN_THREADS", c.scan_threads.get().min(64), 1..=64)?;
+        c.job_timeout = env.secs("ST_WORKER_JOB_TIMEOUT_SECS", c.job_timeout, 10..=86_400)?;
+        c.lease_timeout = env.secs("ST_WORKER_LEASE_TIMEOUT_SECS", c.lease_timeout, 10..=3600)?;
+        c.poll_interval = env.secs("ST_WORKER_POLL_INTERVAL_SECS", c.poll_interval, 1..=3600)?;
+        c.max_attempts = u32::try_from(env.bounded("ST_WORKER_MAX_ATTEMPTS", 3, 1..=20)?.get()).unwrap_or(3);
+        c.allowed_hosts = env
+            .get("ST_WORKER_ALLOWED_HOSTS")
+            .map(|v| v.split(',').map(|h| h.trim().to_ascii_lowercase()).filter(|h| !h.is_empty()).collect())
+            .unwrap_or_default();
+        if c.allowed_hosts.iter().any(|h| !h.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-'))) {
+            return Err(invalid("ST_WORKER_ALLOWED_HOSTS", "comma-separated host names"));
+        }
+        c.allow_any_host = env.parse_or("ST_WORKER_ALLOW_ANY_HOST", false)?;
+        if c.allowed_hosts.is_empty() && !c.allow_any_host {
+            return Err(invalid(
+                "ST_WORKER_ALLOWED_HOSTS",
+                "list the hosts sources may point at (or set ST_WORKER_ALLOW_ANY_HOST=true)",
+            ));
+        }
+        c.allow_local_repos = env.parse_or("ST_WORKER_ALLOW_LOCAL_REPOS", false)?;
+        c.max_blob_bytes = match env.parse_or("ST_WORKER_MAX_BLOB_BYTES", c.max_blob_bytes)? {
+            n @ 1..=67_108_864 => n,
+            _ => return Err(invalid("ST_WORKER_MAX_BLOB_BYTES", "must be 1-67108864")),
+        };
+        c.max_repo_bytes = match env.parse_or("ST_WORKER_MAX_REPO_BYTES", c.max_repo_bytes)? {
+            n @ 1_048_576..=1_099_511_627_776 => n,
+            _ => return Err(invalid("ST_WORKER_MAX_REPO_BYTES", "must be 1 MiB - 1 TiB")),
+        };
+        Ok(c)
+    }
+}
+
+fn invalid(var: &'static str, reason: &str) -> ConfigError {
+    ConfigError::Invalid { var, reason: reason.into() }
 }
 
 struct Env<'a> {
@@ -136,6 +219,43 @@ impl Env<'_> {
         T::Err: std::fmt::Display,
     {
         Ok(self.parse_opt(var)?.unwrap_or(default))
+    }
+
+    fn log_format(&self) -> Result<LogFormat, ConfigError> {
+        match self.get("ST_LOG_FORMAT").as_deref() {
+            None | Some("json") => Ok(LogFormat::Json),
+            Some("pretty") => Ok(LogFormat::Pretty),
+            Some(other) => Err(ConfigError::Invalid {
+                var: "ST_LOG_FORMAT",
+                reason: format!("expected json|pretty, got {other:?}"),
+            }),
+        }
+    }
+
+    fn bounded(
+        &self,
+        var: &'static str,
+        default: usize,
+        range: std::ops::RangeInclusive<usize>,
+    ) -> Result<NonZeroUsize, ConfigError> {
+        let n = self.parse_or(var, default)?;
+        if !range.contains(&n) {
+            return Err(invalid(var, &format!("must be {}-{}", range.start(), range.end())));
+        }
+        NonZeroUsize::new(n).ok_or_else(|| invalid(var, "must not be 0"))
+    }
+
+    fn secs(
+        &self,
+        var: &'static str,
+        default: Duration,
+        range: std::ops::RangeInclusive<u64>,
+    ) -> Result<Duration, ConfigError> {
+        let n = self.parse_or(var, default.as_secs())?;
+        if !range.contains(&n) {
+            return Err(invalid(var, &format!("must be {}-{} seconds", range.start(), range.end())));
+        }
+        Ok(Duration::from_secs(n))
     }
 
     /// Comma-separated IP addresses.
@@ -184,6 +304,7 @@ mod tests {
     use super::*;
 
     const KEY: &str = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="; // 32 bytes
+    const KEY_SPEC: &str = "1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
     const DATA_KEY: &str = "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8="; // 32 bytes
 
     fn load(pairs: &[(&str, &str)]) -> Result<Config, ConfigError> {
@@ -264,6 +385,75 @@ mod tests {
             [("ST_PEPPER_KEYS", base()[1].1), ("ST_DATA_KEY", DATA_KEY), ("ST_DATABASE_URL_FILE", "/nonexistent/st")];
         assert!(matches!(load(&missing).unwrap_err(), ConfigError::File { .. }));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn worker_settings_need_no_data_key() {
+        let vars = [
+            ("ST_DATABASE_URL", "postgres://x"),
+            ("ST_PEPPER_KEYS", KEY_SPEC),
+            ("ST_WORKER_ALLOWED_HOSTS", "git.example"),
+        ];
+        let map: HashMap<String, String> = vars.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+        let s = WorkerSettings::from_lookup(|k| map.get(k).cloned()).unwrap();
+        assert_eq!(s.worker.data_dir, PathBuf::from("/var/lib/secrettrace/worker"));
+        assert_eq!(s.worker.credentials_dir, PathBuf::from("/run/git-credentials"));
+        assert_eq!(s.worker.max_attempts, 3);
+        assert!(!s.worker.allow_local_repos && !s.worker.allow_any_host);
+        assert_eq!(s.worker.max_repo_bytes, 2 * 1024 * 1024 * 1024);
+        assert!(!format!("{s:?}").contains("AAECAw"), "no pepper in Debug");
+    }
+
+    #[test]
+    fn worker_config_values() {
+        let load = |pairs: &[(&str, &str)]| {
+            let mut map: HashMap<String, String> =
+                pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+            map.entry("ST_WORKER_ALLOW_ANY_HOST".into()).or_insert_with(|| "true".into());
+            WorkerConfig::from_lookup(|k| map.get(k).cloned())
+        };
+        let c = load(&[
+            ("ST_WORKER_ID", "w-1"),
+            ("ST_WORKER_CONCURRENCY", "4"),
+            ("ST_WORKER_ALLOWED_HOSTS", "GitHub.com, gitlab.example"),
+            ("ST_WORKER_JOB_TIMEOUT_SECS", "600"),
+            ("ST_WORKER_ALLOW_LOCAL_REPOS", "true"),
+            ("ST_WORKER_SSH_KNOWN_HOSTS", "/etc/kh"),
+        ])
+        .unwrap();
+        assert_eq!((c.worker_id.as_str(), c.concurrency.get()), ("w-1", 4));
+        assert_eq!(c.allowed_hosts, vec!["github.com".to_owned(), "gitlab.example".to_owned()]);
+        assert_eq!(c.job_timeout, Duration::from_secs(600));
+        assert!(c.allow_local_repos);
+        assert_eq!(c.ssh_known_hosts, Some(PathBuf::from("/etc/kh")));
+        for (var, bad) in [
+            ("ST_WORKER_CONCURRENCY", "0"),
+            ("ST_WORKER_CONCURRENCY", "99"),
+            ("ST_WORKER_MAX_ATTEMPTS", "0"),
+            ("ST_WORKER_LEASE_TIMEOUT_SECS", "0"),
+            ("ST_WORKER_POLL_INTERVAL_SECS", "x"),
+            ("ST_WORKER_MAX_BLOB_BYTES", "0"),
+            ("ST_WORKER_ID", "a b"),
+            ("ST_WORKER_ALLOWED_HOSTS", "a/b"),
+            ("ST_WORKER_MAX_REPO_BYTES", "1000"),
+        ] {
+            assert!(matches!(load(&[(var, bad)]), Err(ConfigError::Invalid { .. })), "{var}={bad}");
+        }
+    }
+
+    #[test]
+    fn worker_refuses_any_host_unless_asked() {
+        let load = |pairs: &[(&str, &str)]| {
+            let map: HashMap<String, String> = pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect();
+            WorkerConfig::from_lookup(|k| map.get(k).cloned())
+        };
+        let err = load(&[]).unwrap_err();
+        assert!(matches!(err, ConfigError::Invalid { var: "ST_WORKER_ALLOWED_HOSTS", .. }), "{err}");
+        assert!(load(&[("ST_WORKER_ALLOW_ANY_HOST", "false")]).is_err());
+        let any = load(&[("ST_WORKER_ALLOW_ANY_HOST", "true")]).unwrap();
+        assert!(any.allow_any_host && any.allowed_hosts.is_empty());
+        let listed = load(&[("ST_WORKER_ALLOWED_HOSTS", "git.example")]).unwrap();
+        assert!(!listed.allow_any_host);
     }
 
     #[test]

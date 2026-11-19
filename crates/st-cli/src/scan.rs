@@ -127,7 +127,7 @@ pub fn run(target: Target) -> anyhow::Result<()> {
         Target::Git { repo, revs, max_blob_size, locate, common } => {
             let extractor = common.output.extractor();
             let git = GitRepo::open(&repo)?;
-            let options = GitOptions { revs, max_blob_bytes: max_blob_size };
+            let options = GitOptions { revs, max_blob_bytes: max_blob_size, ..GitOptions::default() };
             let report = scan(&extractor, common.jobs(), |visit| git.blobs(&options, visit))?;
             let head = git.head_blobs()?;
             let min = Confidence::from(common.output.min_confidence);

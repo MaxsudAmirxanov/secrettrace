@@ -81,6 +81,15 @@ pub fn router(state: AppState, limits: HttpLimits) -> Router {
         .route("/secrets", get(routes::secrets::list).post(routes::secrets::create))
         .route("/secrets/{id}", get(routes::secrets::get).patch(routes::secrets::update))
         .route("/secrets/{id}/locations", get(routes::secrets::locations))
+        .route("/sources", get(routes::sources::list).post(routes::sources::create))
+        .route(
+            "/sources/{id}",
+            get(routes::sources::get).patch(routes::sources::update).delete(routes::sources::delete),
+        )
+        .route("/sources/{id}/scans", post(routes::sources::enqueue_scan))
+        .route("/scans", get(routes::scans::list))
+        .route("/scans/{id}", get(routes::scans::get))
+        .route("/scans/{id}/cancel", post(routes::scans::cancel))
         .route("/ingest/scans", post(routes::ingest::start))
         .route("/ingest/scans/{id}/match", post(routes::ingest::match_digests))
         // 5000 findings do not fit the default 1 MiB; this route alone gets more.

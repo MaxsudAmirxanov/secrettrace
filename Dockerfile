@@ -10,8 +10,23 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked -p st-server \
  && cp target/release/secrettrace-server /secrettrace-server
 
-# Minimal runtime: no shell, no package manager, non-root.
-FROM gcr.io/distroless/cc-debian12:nonroot
+# Worker: needs git and ssh to fetch repositories. Same binary, non-root, no package
+# caches. Build with `--target worker`.
+FROM debian:bookworm-slim AS worker
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git openssh-client ca-certificates \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+ && groupadd --gid 65532 nonroot \
+ && useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin nonroot \
+ && install -d -o 65532 -g 65532 -m 0700 /var/lib/secrettrace /var/lib/secrettrace/worker
+COPY --from=build /secrettrace-server /usr/local/bin/secrettrace-server
+USER 65532:65532
+ENV ST_WORKER_DATA_DIR=/var/lib/secrettrace/worker
+ENTRYPOINT ["/usr/local/bin/secrettrace-server"]
+CMD ["worker"]
+
+# API server (default target, last): no shell, no package manager, non-root.
+FROM gcr.io/distroless/cc-debian12:nonroot AS server
 COPY --from=build /secrettrace-server /usr/local/bin/secrettrace-server
 USER nonroot:nonroot
 EXPOSE 8080

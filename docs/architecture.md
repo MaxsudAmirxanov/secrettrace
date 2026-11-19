@@ -35,9 +35,9 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
  агент/CI ─▶│ :8443 mTLS → /api/v1/ingest          │
             └───────────────┬──────────────────────┘
                             ▼
-      secrettrace-server serve  ◀── Postgres 17 ──▶  secrettrace-server worker (этап 9)
-      (axum)                       реестр, locations,  очередь SKIP LOCKED, outbox алертов,
-                                   алерты, аудит       cron истечения сроков
+      secrettrace-server serve  ◀── Postgres 17 ──▶  secrettrace-server worker
+      (axum)                       реестр, locations,  очередь SKIP LOCKED, планировщик, git fetch,
+                                   алерты, аудит       outbox алертов (этап 10)
 ```
 
 | Крейт | Назначение |
@@ -188,16 +188,88 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 - **Аудит**: `ingest.scan_start`, `ingest.match`, `ingest.findings`, `ingest.scan_complete` от имени токена;
   в деталях только счётчики и id. Алерты на новые нарушения — этап 10.
 
-## 9. Ошибки API
+## 9. Воркер
+
+`secrettrace-server worker` — отдельный процесс (и образ с git): очередь, планировщик, жнец, клонирование.
+Серверное сканирование есть только у `git_repo`: файловую систему сервера воркер не читает.
+
+- **Источники** управляются через `/api/v1/sources` (Viewer читает, Operator пишет, CSRF); `type` и `uri`
+  неизменяемы. Ручной запуск — `POST /sources/{id}/scans`, отмена — `POST /scans/{id}/cancel`.
+- **Очередь** — сама таблица `scan_jobs`. Захват одним `UPDATE … WHERE id = (SELECT … FOR UPDATE SKIP LOCKED
+  LIMIT 1)`; `locked_by`/`locked_at` — аренда, воркер продлевает её каждые `lease/5`. Обновление аренды
+  с условием `status = 'running' AND locked_by = me` заодно проверяет отмену: 0 строк — работа
+  останавливается (git убивается, обход прекращается флагом между документами).
+  Уникальный частичный индекс `scan_jobs_worker_active_uniq` держит не больше одной
+  queued/running задачи воркера на источник: ни очереди за медленным сканом, ни двух fetch в одно зеркало.
+- **Итог** пишется одной транзакцией: задача снова блокируется и проверяется владелец, затем
+  `ingest::record_findings` (тот же матчинг и upsert, что у API), снятие `in_current_state`, новый
+  `scan_state`, статус, аудит `scan.finish`. Результат либо применён целиком, либо не применён.
+- **Повторы.** Сетевые и временные ошибки — обратно в очередь с `run_after = now() + 60 с · 2^(attempt-1)`,
+  до `ST_WORKER_MAX_ATTEMPTS`. Без повторов: неподдерживаемый URI, хост не в списке, нет или неверен
+  credential, нет known_hosts для ssh. Жнец возвращает задачи с истёкшей арендой и закрывает сканы
+  API-токенов старше 24 часов. При остановке воркера задачи возвращаются в очередь без траты попытки.
+- **Планировщик** (`schedule.rs`): 5 полей cron в UTC, не чаще раза в 5 минут. `sources.next_scan_at`
+  считается при сохранении; воркер берёт наступившие источники `FOR UPDATE SKIP LOCKED`, ставит задачу,
+  если активной нет, и сдвигает `next_scan_at` от текущего момента: пропущенные срабатывания
+  сливаются в одно.
+- **Зеркало**: `<data_dir>/repos/<source_id>.git`, `git init --bare` + fetch только `refs/heads/*`
+  и `refs/tags/*` (без `refs/pull/*`), `HEAD` — ветка по умолчанию удалённого репозитория. Если URL
+  remote не совпадает с источником, зеркало пересоздаётся. Зеркала удалённых источников удаляются
+  (только каталоги с именем `<uuid>.git`, без перехода по симлинкам).
+- **Изоляция git**: окружение очищается как в st-source, `HOME` — личный временный каталог задачи,
+  `GIT_CONFIG_NOSYSTEM`, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_ALLOW_PROTOCOL=https:ssh`, `protocol.allow=never`
+  кроме https/ssh, без редиректов, credential helper'ов, хуков, сабмодулей и авто-gc. URI проверяется до
+  запуска git: `https://`, `ssh://`, `user@host:path`; хост и путь не начинаются с `-`; IP-литералы
+  (включая десятичные и шестнадцатеричные формы IPv4) только если перечислены явно.
+  `ST_WORKER_ALLOWED_HOSTS` обязателен (пустой — только с `ST_WORKER_ALLOW_ANY_HOST=true`). Каждый git —
+  в своей группе процессов, отмена и тайм-аут убивают группу (вместе с `git-remote-https` и `ssh`);
+  `http.lowSpeedLimit`, ssh `ConnectTimeout`/`ServerAliveInterval`; `transfer.fsckObjects`; stdout и stderr
+  читаются с ограничением; размер `objects/` проверяется во время fetch (`ST_WORKER_MAX_REPO_BYTES`).
+  Ошибки git сводятся к фиксированным категориям: текст удалённой стороны (`remote:`, `ERR`) не сохраняется,
+  иначе зритель видел бы подставленные сервером сообщения, а по ошибкам соединения можно было бы сканировать
+  внутренние порты.
+- **Credentials по ссылке и по хостам.** `credential_ref` — имя файла в `ST_WORKER_CREDENTIALS_DIR`.
+  Пользоваться им можно только для хостов из `<ref>.hosts` рядом (точка в имени не проходит проверку
+  `credential_ref`, поэтому файл привязки сам credential'ом не станет). Без привязки оператор указал бы
+  свой хост, git получил бы 401 и отдал бы токен. Файл открывается
+  с `O_NOFOLLOW`, только обычный, до 16 КиБ, читается в `Zeroizing` и копируется во временный каталог
+  задачи (0700/0600), который удаляется после неё (зависшие каталоги `st-job-*` чистятся при старте,
+  core dump отключён). HTTPS: `GIT_ASKPASS` — сам бинарник сервера; в режиме askpass он отвечает
+  только на запросы для `https://[user@]<хост источника>[:port]`: на «Username…» — именем из
+  `config.username` (по умолчанию `x-access-token`), на «Password…» — содержимым копии. Запрос прокси (407)
+  или другого хоста остаётся без ответа. SSH: `GIT_SSH_COMMAND` с `-F /dev/null`, `BatchMode`, `IdentitiesOnly`,
+  копией ключа и `StrictHostKeyChecking=yes` по `ST_WORKER_SSH_KNOWN_HOSTS`. Значение не попадает в argv,
+  значения переменных окружения, конфиг git, логи, ошибки и БД. Воркеру не нужен `ST_DATA_KEY`.
+- **Инкрементальность.** `scan_state = {"v":1,"tips":[…],"registry":"…"}` — коммиты всех веток и тегов
+  на момент скана (до 10 000) и отметка реестра (число секретов, последний `created_at`, версии pepper),
+  снятая до чтения. Изменилась отметка или задан `full_scan` — история читается целиком: иначе секрет,
+  зарегистрированный после коммита, в старой истории никогда не нашёлся бы. Следующий скан читает историю от новых вершин, исключая достижимое из старых
+  (`^oid` через `rev-list --stdin`), и вдобавок все blob'ы дерева `HEAD`, которых не было в этом проходе:
+  текущее состояние каждый раз видно целиком. Поэтому каждый скан воркера снимает `in_current_state`
+  с мест источника, которых не увидел, но только с тех, что сообщал воркер (не API-токены) и что старше
+  начала скана; пути из `HEAD`, чей blob в этот раз не прочитан (слишком большой, ошибка), не трогаются.
+  Нет пригодных старых вершин — полный скан. Зеркало на время задачи заблокировано (`File::try_lock`),
+  аренда — `<worker_id>/<uuid захвата>`, поэтому зависший прежний запуск не продлит чужую аренду.
+  Находки пишутся одним `record_findings`: один порядок блокировок.
+- **Находки**: все кандидаты (любой уверенности), матчатся только зарегистрированные. Для совпавших blob'ов
+  `locate()` даёт коммит появления; место — по каждому пути в `HEAD` (`in_current_state = true`) и первый
+  путь из истории. Пути с управляющими символами экранируются и обрезаются до 1024 байт.
+- **Сеть compose**: Postgres только во внутренней сети `db`; сервер в `db` + `edge` (опубликованный порт),
+  воркер в `db` + `egress`.
+- **Ограничения**: зеркала не проходят gc (недостижимые объекты остаются); у воркера та же роль БД, что
+  у сервера (отдельная роль — позже); базовый образ не зафиксирован по digest; места воркера и CI одного
+  URI — общие строки; остановка воркера возвращает попытку задаче.
+
+## 10. Ошибки API
 
 `application/problem+json`, поле `type` — стабильный URN: `urn:secrettrace:problem:{bad-request|unauthorized|
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
-## 10. Схема БД
-См. `migrations/0001_core.sql`, `0002_auth.sql` и `0003_ingest.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
+## 11. Схема БД
+См. `migrations/0001_core.sql`, `0002_auth.sql`, `0003_ingest.sql` и `0004_worker.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
 `scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
 
-## 11. План MVP
+## 12. План MVP
 
 | # | Задача | Статус |
 |---|---|---|
@@ -210,7 +282,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 6 | Извлечение кандидатов: known formats, kv, URL userinfo, PEM, high-entropy; декодеры base64/url/json | ✅ |
 | 7 | Источники-плагины: filesystem, git (уникальные blob'ы + `--find-object`) | ✅ |
 | 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | ✅ |
-| 9 | Воркер: очередь, планировщик, клонирование по `credential_ref` | |
+| 9 | Воркер: очередь, планировщик, клонирование по `credential_ref`; API источников и сканов | ✅ |
 | 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |
 | 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | |
 | 12 | Web UI (React + TS): логин и MFA, секреты, locations, алерты, источники | |

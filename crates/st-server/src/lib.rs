@@ -17,4 +17,7 @@ pub mod pagination;
 pub mod policy;
 pub mod registry;
 pub mod routes;
+pub mod schedule;
+pub mod sources;
 pub mod users;
+pub mod worker;

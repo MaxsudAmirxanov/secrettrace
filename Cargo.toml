@@ -20,6 +20,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "http2"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
+croner = { version = "4", default-features = false, features = ["chrono"] }
 globset = { version = "0.4", default-features = false }
 hex = "0.4"
 hmac = "0.12"
@@ -27,6 +28,7 @@ libc = "0.2"
 rand = "0.8"
 regex = "1"
 rpassword = "7"
+rustix = { version = "1", default-features = false, features = ["std", "process"] }
 secrecy = { version = "0.10", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

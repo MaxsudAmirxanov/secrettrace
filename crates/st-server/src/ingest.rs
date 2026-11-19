@@ -42,9 +42,9 @@ use crate::policy::{Subject, first_match, load_rules};
 pub const MAX_DIGESTS_PER_REQUEST: usize = 10_000;
 pub const MAX_FINDINGS_PER_REQUEST: usize = 5_000;
 /// Jobs older than this no longer accept data (the worker will fail them).
-const JOB_MAX_AGE_HOURS: i32 = 24;
+pub(crate) const JOB_MAX_AGE_HOURS: i32 = 24;
 const MAX_URI_LEN: usize = 2048;
-const MAX_PATH_LEN: usize = 1024;
+pub(crate) const MAX_PATH_LEN: usize = 1024;
 const MAX_ENCODINGS: usize = 8;
 const MAX_STATS_KEYS: usize = 32;
 const MAX_ERROR_LEN: usize = 500;
@@ -299,7 +299,7 @@ const CREDENTIAL_PARAMS: &[&str] = &[
 
 /// Would storing this URI store a credential? Errs on the side of rejecting: browsers and
 /// URL libraries accept `https:\\u:p@h`, `https:/u:p@h` and `https:///u:p@h` too.
-fn has_credentials(uri: &str) -> bool {
+pub(crate) fn has_credentials(uri: &str) -> bool {
     authority_has_credentials(uri) || params_have_credentials(uri)
 }
 
@@ -360,7 +360,7 @@ fn percent_decode_ascii(s: &str) -> String {
     out
 }
 
-fn validate_uri(uri: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_uri(uri: &str) -> Result<(), ApiError> {
     if uri.is_empty() || uri.len() > MAX_URI_LEN {
         return Err(unprocessable(format!("source.uri must be 1-{MAX_URI_LEN} bytes")));
     }
@@ -373,7 +373,7 @@ fn validate_uri(uri: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
-fn validate_environment(env: Option<&str>) -> Result<Option<String>, ApiError> {
+pub(crate) fn validate_environment(env: Option<&str>) -> Result<Option<String>, ApiError> {
     match env {
         None => Ok(None),
         Some(e)
@@ -387,7 +387,7 @@ fn validate_environment(env: Option<&str>) -> Result<Option<String>, ApiError> {
 }
 
 /// Name of an auto-created source: `"{type}:{uri}"`, shortened with a hash suffix.
-fn source_name(source_type: SourceType, uri: &str) -> String {
+pub(crate) fn source_name(source_type: SourceType, uri: &str) -> String {
     let name = format!("{}:{uri}", source_type_str(source_type));
     if name.chars().count() <= SOURCE_NAME_LEN {
         return name;
@@ -421,11 +421,11 @@ fn locator_key(source_type: SourceType, uri: &str, path: &str) -> [u8; 32] {
     h.finalize().into()
 }
 
-fn is_object_id(s: &str) -> bool {
+pub(crate) fn is_object_id(s: &str) -> bool {
     matches!(s.len(), 40 | 64) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-fn validate_finding(i: usize, f: &FindingIn) -> Result<(), ApiError> {
+pub(crate) fn validate_finding(i: usize, f: &FindingIn) -> Result<(), ApiError> {
     let field = |name: &str, rule: &str| unprocessable(format!("findings[{i}].{name} {rule}"));
     if f.path.is_empty() || f.path.len() > MAX_PATH_LEN || f.path.chars().any(char::is_control) {
         return Err(field("path", "must be 1-1024 bytes without control characters"));
@@ -543,7 +543,7 @@ fn merge(items: impl IntoIterator<Item = Pending>) -> Vec<Pending> {
 
 /// Registered secret per digest, over every configured pepper version. Secrets of any
 /// status match: a leaked revoked or rotated value is still a leak.
-async fn registered(
+pub(crate) async fn registered(
     conn: &mut PgConnection,
     pepper: &Pepper,
     digests: &[Digest],
@@ -575,16 +575,17 @@ async fn registered(
     Ok(out)
 }
 
-/// A running scan owned by the caller, locked for the rest of the transaction.
+/// A running scan, locked for the rest of the transaction (by `lock_job` for API scans,
+/// by the worker for its own jobs).
 #[derive(Debug)]
-struct Job {
-    id: Uuid,
-    source_id: Uuid,
-    source_type: SourceType,
-    uri: String,
-    environment: Option<String>,
-    full_scan: bool,
-    started_at: DateTime<Utc>,
+pub(crate) struct Job {
+    pub(crate) id: Uuid,
+    pub(crate) source_id: Uuid,
+    pub(crate) source_type: SourceType,
+    pub(crate) uri: String,
+    pub(crate) environment: Option<String>,
+    pub(crate) full_scan: bool,
+    pub(crate) started_at: DateTime<Utc>,
 }
 
 async fn lock_job(
@@ -737,25 +738,40 @@ pub async fn findings(
         validate_finding(i, f)?;
     }
     let job = lock_job(tx, principal, scan_id, false).await?;
+    // `/findings` answers "is this digest registered?" as well (accepted vs ignored).
+    let unique = req.findings.iter().map(|f| f.digest).collect::<HashSet<_>>().len();
+    if !limiter.allow_digests(principal.id, unique) {
+        return Err(ApiError::TooManyRequests);
+    }
+    let out = record_findings(tx, pepper, &job, &req.findings).await?;
 
-    // Re-match every digest: a client cannot attach locations to a secret it did not find.
+    let details = serde_json::to_value(&out).map_err(anyhow::Error::from)?;
+    audit::record(tx, &audit_event.target("scan_job", job.id.to_string()).details(details)).await?;
+    Ok(out)
+}
+
+/// Store the locations of validated findings for a job: every digest is matched again
+/// (nothing is stored for unregistered ones), duplicates are merged, allow rules decide
+/// `is_allowed`. Shared by `/findings` and the worker; the caller holds the job lock.
+pub(crate) async fn record_findings(
+    tx: &mut Transaction<'_, Postgres>,
+    pepper: &Pepper,
+    job: &Job,
+    findings: &[FindingIn],
+) -> Result<FindingsResponse, ApiError> {
     let mut digest_index: HashMap<Digest, usize> = HashMap::new();
     let mut unique = Vec::new();
-    for f in &req.findings {
+    for f in findings {
         digest_index.entry(f.digest).or_insert_with(|| {
             unique.push(f.digest);
             unique.len() - 1
         });
     }
-    // `/findings` answers "is this digest registered?" as well (accepted vs ignored).
-    if !limiter.allow_digests(principal.id, unique.len()) {
-        return Err(ApiError::TooManyRequests);
-    }
     let found = registered(tx, pepper, &unique).await?;
 
     let mut out = FindingsResponse::default();
     let mut accepted = Vec::new();
-    for f in &req.findings {
+    for f in findings {
         let Some(&secret_id) = digest_index.get(&f.digest).and_then(|i| found.get(i)) else {
             out.ignored += 1;
             continue;
@@ -772,10 +788,7 @@ pub async fn findings(
     let mut pending = merge(accepted);
     // One lock order for every request: concurrent upserts cannot deadlock.
     pending.sort_unstable_by(|a, b| (a.secret_id, a.key).cmp(&(b.secret_id, b.key)));
-    upsert_locations(tx, &job, &pending, &mut out).await?;
-
-    let details = serde_json::to_value(&out).map_err(anyhow::Error::from)?;
-    audit::record(tx, &audit_event.target("scan_job", job.id.to_string()).details(details)).await?;
+    upsert_locations(tx, job, &pending, &mut out).await?;
     Ok(out)
 }
 

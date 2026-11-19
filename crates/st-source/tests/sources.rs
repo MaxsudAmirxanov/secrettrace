@@ -403,3 +403,117 @@ fn early_stop_kills_git_cleanly() {
         .unwrap();
     assert_eq!((seen, stats.documents), (3, 3));
 }
+
+#[test]
+fn incremental_history_with_the_whole_current_tree() {
+    let mut g = Gen(41);
+    let old_secret = g.github();
+    let repo = Repo::new();
+    repo.write("config/prod.env", format!("GITHUB_TOKEN={old_secret}\n"));
+    repo.write("gone.env", format!("GITHUB_TOKEN={}\n", g.github()));
+    repo.write("logo.png", b"\x89PNG\0\0binary");
+    let c1 = repo.commit("init");
+    repo.git(&["rm", "-q", "gone.env"]);
+    repo.write("new.env", format!("GITHUB_TOKEN={}\n", g.github()));
+    repo.commit("more");
+
+    let handle = GitRepo::open(repo.path()).unwrap();
+    let tips = handle.ref_tips().unwrap();
+    assert_eq!(tips.len(), 1);
+    let c1 = ObjectId::parse(&c1).unwrap();
+    let missing = ObjectId::parse(&"e".repeat(40)).unwrap();
+    let blob = repo.blob("HEAD:config/prod.env");
+    let existing = handle.existing_commits(&[c1.clone(), missing, blob]).unwrap();
+    assert_eq!(existing.into_iter().collect::<Vec<_>>(), vec![c1.clone()], "only present commits");
+
+    // History since c1 alone: new.env only.
+    let since = repo.scan(&GitOptions { exclude: vec![c1.clone()], ..GitOptions::default() }).unwrap();
+    assert_eq!(token_paths(&since), BTreeSet::from(["new.env".into()]));
+    assert_eq!(since.stats.documents, 1);
+
+    // Plus the current tree: prod.env comes back (unchanged since c1), gone.env does not;
+    // the binary in HEAD is counted once.
+    let options = GitOptions { exclude: vec![c1], current_tree: Some("HEAD".into()), ..GitOptions::default() };
+    let full_state = repo.scan(&options).unwrap();
+    assert_eq!(token_paths(&full_state), BTreeSet::from(["config/prod.env".into(), "new.env".into()]));
+    assert_eq!((full_state.stats.documents, full_state.stats.skipped_binary), (2, 1), "{:?}", full_state.stats);
+
+    // Without exclusions the tree adds nothing new: every HEAD blob is in the history.
+    let all = repo.scan(&GitOptions { current_tree: Some("HEAD".into()), ..GitOptions::default() }).unwrap();
+    assert_eq!(all.stats.documents, 3);
+    assert_eq!(token_paths(&all).len(), 3);
+
+    // Hostile tree revisions are rejected; an unresolvable one adds nothing.
+    let bad = repo.scan(&GitOptions { current_tree: Some("--output=/tmp/x".into()), ..GitOptions::default() });
+    assert!(matches!(bad, Err(SourceError::Revision(_))));
+    let none = repo.scan(&GitOptions { current_tree: Some("nope".into()), ..GitOptions::default() }).unwrap();
+    assert_eq!(none.stats.documents, 3);
+}
+
+#[test]
+fn annotated_tags_are_peeled_and_empty_repos_have_no_tips() {
+    let empty = Repo::new();
+    assert!(GitRepo::open(empty.path()).unwrap().ref_tips().unwrap().is_empty());
+    let tree_only = empty.scan(&GitOptions { current_tree: Some("HEAD".into()), ..GitOptions::default() }).unwrap();
+    assert_eq!(tree_only.stats.documents, 0);
+
+    let repo = Repo::new();
+    repo.write("a.txt", "a\n");
+    let c1 = repo.commit("one");
+    repo.git(&["tag", "-a", "-m", "release", "v1"]);
+    repo.write("a.txt", "b\n");
+    let c2 = repo.commit("two");
+    let mut want = vec![ObjectId::parse(&c1).unwrap(), ObjectId::parse(&c2).unwrap()];
+    want.sort();
+    assert_eq!(GitRepo::open(repo.path()).unwrap().ref_tips().unwrap(), want);
+}
+
+#[test]
+fn start_commits_on_stdin_replace_all_refs() {
+    let mut g = Gen(43);
+    let repo = Repo::new();
+    repo.write("a.env", format!("TOKEN={}\n", g.github()));
+    let c1 = repo.commit("one");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("side.env", format!("TOKEN={}\n", g.github()));
+    repo.commit("side");
+    repo.git(&["checkout", "-q", "main"]);
+    let only_c1 = GitOptions { include: vec![ObjectId::parse(&c1).unwrap()], ..GitOptions::default() };
+    assert_eq!(token_paths(&repo.scan(&only_c1).unwrap()), BTreeSet::from(["a.env".into()]));
+    assert_eq!(token_paths(&repo.scan(&GitOptions::default()).unwrap()).len(), 2, "empty include: --all");
+}
+
+#[cfg(unix)]
+#[test]
+fn cancellation_kills_git_and_its_helpers() {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
+
+    let dir = TempDir::new().unwrap();
+    let marker = dir.path().join("still-running");
+    let fake = dir.path().join("git");
+    // A "git" that answers the repository check and otherwise hangs, with a helper child.
+    let script = format!(
+        "#!/bin/sh\ncase \"$*\" in *rev-parse*--git-dir*) exit 0;; esac\n\
+         (sleep 3; touch '{}') &\nsleep 30\n",
+        marker.display()
+    );
+    fs::write(&fake, script).unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let repo = GitRepo::open_with(dir.path(), &fake).unwrap().with_cancel(Arc::clone(&cancel));
+    let flag = Arc::clone(&cancel);
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(300));
+        flag.store(true, Ordering::Relaxed);
+    });
+    let started = Instant::now();
+    assert!(repo.ref_tips().is_err(), "a killed git is an error");
+    assert!(started.elapsed() < Duration::from_secs(5), "stopped promptly: {:?}", started.elapsed());
+    stopper.join().unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(!marker.exists(), "the helper in git's process group was killed too");
+}

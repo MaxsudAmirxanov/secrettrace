@@ -745,6 +745,213 @@
         ]
       }
     },
+    "/api/v1/scans": {
+      "get": {
+        "tags": [
+          "scans"
+        ],
+        "summary": "List scans, newest first.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "source_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/JobStatus"
+            }
+          },
+          {
+            "name": "trigger",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/ScanTrigger"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_ScanOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scans/{id}": {
+      "get": {
+        "tags": [
+          "scans"
+        ],
+        "summary": "Get one scan.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/scans/{id}/cancel": {
+      "post": {
+        "tags": [
+          "scans"
+        ],
+        "summary": "Cancel a queued or running server-side scan.",
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Finished, or reported by an API token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/api/v1/secrets": {
       "get": {
         "tags": [
@@ -1107,6 +1314,431 @@
         ]
       }
     },
+    "/api/v1/sources": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "List sources, newest first.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "$ref": "#/components/schemas/SourceType"
+            }
+          },
+          {
+            "name": "enabled",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "maximum": 200,
+              "minimum": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Page_SourceOut"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Create a source. Credentials are referenced by name (`credential_ref`), never sent.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Name or (type, uri) already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sources/{id}": {
+      "get": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Get one source.",
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "session": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Delete a source; its active scan is cancelled, found locations are kept.",
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Update a source. `type` and `uri` are immutable; disabling cancels its active scan.",
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceOut"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Name already exists",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
+    "/api/v1/sources/{id}/scans": {
+      "post": {
+        "tags": [
+          "sources"
+        ],
+        "summary": "Queue a server-side scan of a git repository source. Optional body `{\"full\": true}`\nrescans the whole history instead of only what is new since the last scan.",
+        "operationId": "enqueue_scan",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Optional; empty body means `{\"full\": false}`",
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/ScanRequest"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanOut"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Source disabled, or a scan is already queued or running",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "Non-empty body that is not JSON",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Not a git_repo source, or invalid body",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "csrf": [],
+            "session": []
+          }
+        ]
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -1148,6 +1780,23 @@
   },
   "components": {
     "schemas": {
+      "ActiveScan": {
+        "type": "object",
+        "description": "The queued or running server-side scan of a source.",
+        "required": [
+          "id",
+          "status"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        }
+      },
       "AllowRuleIn": {
         "type": "object",
         "description": "Where a secret is allowed to appear. All set fields must match.",
@@ -1511,6 +2160,16 @@
         },
         "additionalProperties": false
       },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "cancelled"
+        ]
+      },
       "LocationOut": {
         "type": "object",
         "required": [
@@ -1744,6 +2403,105 @@
           }
         }
       },
+      "Page_ScanOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "trigger",
+                "status",
+                "full_scan",
+                "attempts",
+                "created_at",
+                "run_after",
+                "stats"
+              ],
+              "properties": {
+                "attempts": {
+                  "type": "integer",
+                  "format": "int32"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Failure or cancellation reason; never file contents."
+                },
+                "finished_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "full_scan": {
+                  "type": "boolean",
+                  "description": "Whole history (`true`) or only what is new since the last scan."
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "requested_by": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "run_after": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "Not claimed before this time (retry backoff)."
+                },
+                "source_id": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "uuid"
+                },
+                "started_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "stats": {
+                  "type": "object",
+                  "description": "Counters only (documents, candidates, matched, violations, …)."
+                },
+                "status": {
+                  "$ref": "#/components/schemas/JobStatus"
+                },
+                "trigger": {
+                  "$ref": "#/components/schemas/ScanTrigger"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page; absent on the last page."
+          }
+        }
+      },
       "Page_SecretOut": {
         "type": "object",
         "required": [
@@ -1835,6 +2593,105 @@
                 "violation_count": {
                   "type": "integer",
                   "format": "int64"
+                }
+              }
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` to fetch the next page; absent on the last page."
+          }
+        }
+      },
+      "Page_SourceOut": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "name",
+                "type",
+                "uri",
+                "enabled",
+                "config",
+                "created_at"
+              ],
+              "properties": {
+                "active_scan": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/ActiveScan",
+                      "description": "The queued or running server-side (manual/scheduled) scan, if any."
+                    }
+                  ]
+                },
+                "config": {
+                  "$ref": "#/components/schemas/SourceConfig"
+                },
+                "created_at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "credential_ref": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "enabled": {
+                  "type": "boolean"
+                },
+                "environment": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "last_scan_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "next_scan_at": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "format": "date-time"
+                },
+                "schedule": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "Normalized cron expression (UTC)."
+                },
+                "type": {
+                  "$ref": "#/components/schemas/SourceType"
+                },
+                "uri": {
+                  "type": "string"
                 }
               }
             }
@@ -1961,6 +2818,98 @@
           }
         }
       },
+      "ScanOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "trigger",
+          "status",
+          "full_scan",
+          "attempts",
+          "created_at",
+          "run_after",
+          "stats"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Failure or cancellation reason; never file contents."
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "full_scan": {
+            "type": "boolean",
+            "description": "Whole history (`true`) or only what is new since the last scan."
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "requested_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "run_after": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Not claimed before this time (retry backoff)."
+          },
+          "source_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "stats": {
+            "type": "object",
+            "description": "Counters only (documents, candidates, matched, violations, …)."
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          },
+          "trigger": {
+            "$ref": "#/components/schemas/ScanTrigger"
+          }
+        }
+      },
+      "ScanRequest": {
+        "type": "object",
+        "description": "Body of `POST /sources/{id}/scans` (optional).",
+        "properties": {
+          "full": {
+            "type": "boolean",
+            "description": "Scan the whole history, ignoring what earlier scans covered."
+          }
+        },
+        "additionalProperties": false
+      },
       "ScanStart": {
         "type": "object",
         "required": [
@@ -2004,6 +2953,16 @@
             "format": "uuid"
           }
         }
+      },
+      "ScanTrigger": {
+        "type": "string",
+        "description": "What started a scan: a user (`manual`), the scheduler, or an API token (`ci`, `agent`).",
+        "enum": [
+          "manual",
+          "schedule",
+          "ci",
+          "agent"
+        ]
       },
       "SecretCreate": {
         "type": "object",
@@ -2215,6 +3174,178 @@
         },
         "additionalProperties": false
       },
+      "SourceConfig": {
+        "type": "object",
+        "description": "Per-source scan settings. Never holds credentials.",
+        "properties": {
+          "max_blob_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Skip blobs larger than this (default: the worker's limit, 16 MiB).",
+            "maximum": 67108864,
+            "minimum": 1
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User name for HTTPS (with the token from `credential_ref`) or for `ssh://` URIs\nwithout one. Default for HTTPS: `x-access-token`.",
+            "example": "x-access-token",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._@][A-Za-z0-9._@-]*$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SourceCreate": {
+        "type": "object",
+        "required": [
+          "name",
+          "type",
+          "uri"
+        ],
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceConfig"
+              }
+            ]
+          },
+          "credential_ref": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of a credential file in the worker's credentials directory (never a value).",
+            "example": "github_infra",
+            "pattern": "^[A-Za-z0-9_-]{1,64}$"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "example": "prod"
+          },
+          "name": {
+            "type": "string",
+            "example": "infra-app",
+            "maxLength": 200,
+            "minLength": 1
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "5-field cron expression in UTC, at most every 5 minutes; `git_repo` only.",
+            "example": "0 3 * * *"
+          },
+          "type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "uri": {
+            "type": "string",
+            "description": "Repository URL without credentials: `https://host/org/repo.git`, `ssh://host/org/repo.git`\nor `git@host:org/repo.git`.",
+            "example": "https://git.example/infra/app.git",
+            "maxLength": 2048
+          }
+        },
+        "additionalProperties": false
+      },
+      "SourceOut": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "uri",
+          "enabled",
+          "config",
+          "created_at"
+        ],
+        "properties": {
+          "active_scan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ActiveScan",
+                "description": "The queued or running server-side (manual/scheduled) scan, if any."
+              }
+            ]
+          },
+          "config": {
+            "$ref": "#/components/schemas/SourceConfig"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "credential_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "last_scan_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "next_scan_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Normalized cron expression (UTC)."
+          },
+          "type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "uri": {
+            "type": "string"
+          }
+        }
+      },
       "SourceRef": {
         "type": "object",
         "required": [
@@ -2243,6 +3374,53 @@
           "app_log",
           "wiki"
         ]
+      },
+      "SourceUpdate": {
+        "type": "object",
+        "description": "Partial update. Absent fields are unchanged; `null` clears nullable fields;\n`config`, when present, replaces the whole object. `type` and `uri` cannot change.",
+        "properties": {
+          "config": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceConfig"
+              }
+            ]
+          },
+          "credential_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "enabled": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "schedule": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "TokenInfo": {
         "type": "object",
@@ -2360,6 +3538,14 @@
     {
       "name": "ingest",
       "description": "Scan results from agents and CI (API tokens): match digests, report locations"
+    },
+    {
+      "name": "sources",
+      "description": "Sources to scan: git repositories with schedule and credential reference"
+    },
+    {
+      "name": "scans",
+      "description": "Scan jobs: server-side (manual, scheduled) and reported by API tokens"
     },
     {
       "name": "health",

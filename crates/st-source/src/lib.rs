@@ -26,7 +26,10 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 pub use fs::{DEFAULT_EXCLUDES, FsOptions, FsSource};
-pub use git::{Change, GitOptions, GitRepo, ObjectId, Occurrence};
+pub use git::{
+    Change, GIT_BASE_CONFIG, GIT_BASE_ENV, GitOptions, GitRepo, MAX_EXCLUDES, ObjectId, Occurrence, SCRUBBED_ENV,
+    git_command, kill_process_group,
+};
 pub use pipeline::{DocumentFindings, Report, scan};
 pub use st_extract::Candidate;
 pub use text::{TextEncoding, decode_text};

@@ -25,7 +25,7 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
-    networks: [backend]
+    networks: [db]
     restart: unless-stopped
 
   migrate:
@@ -41,7 +41,7 @@ services:
     secrets: [app_database_url, owner_database_url, pepper_keys, data_key]
     depends_on:
       postgres: { condition: service_healthy }
-    networks: [backend]
+    networks: [db]
     restart: "no"
 
   server:
@@ -60,7 +60,41 @@ services:
     depends_on:
       migrate: { condition: service_completed_successfully }
     ports: ["127.0.0.1:8080:8080"]
-    networks: [backend]
+    networks: [db, edge]
+    restart: unless-stopped
+
+  worker:
+    <<: *hardening
+    build: { context: ., target: worker }
+    image: secrettrace-worker:dev
+    command: ["worker"]
+    environment:
+      ST_DATABASE_URL_FILE: /run/secrets/app_database_url
+      ST_PEPPER_KEYS_FILE: /run/secrets/pepper_keys
+      ST_LOG_FORMAT: json
+      ST_WORKER_DATA_DIR: /var/lib/secrettrace/worker
+      ST_WORKER_CREDENTIALS_DIR: /run/git-credentials
+      ST_WORKER_SSH_KNOWN_HOSTS: /etc/secrettrace/ssh_known_hosts
+      # Hosts sources may point at (comma-separated), e.g. github.com,gitlab.example. Required:
+      # the worker refuses to start with an empty list unless ST_WORKER_ALLOW_ANY_HOST=true.
+      ST_WORKER_ALLOWED_HOSTS: ${ST_WORKER_ALLOWED_HOSTS:-}
+      ST_WORKER_ALLOW_ANY_HOST: ${ST_WORKER_ALLOW_ANY_HOST:-false}
+      ST_WORKER_MAX_REPO_BYTES: ${ST_WORKER_MAX_REPO_BYTES:-2147483648}
+    # No data_key: the worker never touches TOTP seeds.
+    secrets: [app_database_url, pepper_keys]
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    mem_limit: 2g
+    pids_limit: 256
+    ulimits:
+      core: 0
+      nofile: { soft: 4096, hard: 4096 }
+    volumes:
+      - worker-data:/var/lib/secrettrace/worker
+      - ./deploy/worker/git-credentials:/run/git-credentials:ro
+      - ./deploy/worker/ssh_known_hosts:/etc/secrettrace/ssh_known_hosts:ro
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    networks: [db, egress]
     restart: unless-stopped
 
 secrets:
@@ -74,6 +108,13 @@ secrets:
 
 volumes:
   pgdata:
+  worker-data:
 
 networks:
-  backend:
+  # Postgres only: no route outside the host.
+  db:
+    internal: true
+  # The published API port.
+  edge:
+  # Outbound access for the worker (git hosts).
+  egress:

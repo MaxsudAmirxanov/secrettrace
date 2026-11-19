@@ -37,6 +37,12 @@ fn spec_covers_routes_and_security() {
         "/api/v1/ingest/scans/{id}/match",
         "/api/v1/ingest/scans/{id}/findings",
         "/api/v1/ingest/scans/{id}/complete",
+        "/api/v1/sources",
+        "/api/v1/sources/{id}",
+        "/api/v1/sources/{id}/scans",
+        "/api/v1/scans",
+        "/api/v1/scans/{id}",
+        "/api/v1/scans/{id}/cancel",
     ] {
         assert!(paths.contains_key(p), "missing {p}");
     }
@@ -88,6 +94,13 @@ fn spec_covers_routes_and_security() {
     }
     for name in ["ScanStarted", "MatchResponse", "FindingsResponse", "ScanCompleted"] {
         assert!(!schemas[name].to_string().contains("\"digest\""), "{name} exposes a digest field");
+    }
+    // Sources reference credentials by name only; worker state and leases stay internal.
+    for name in ["SourceOut", "SourceCreate", "SourceUpdate", "SourceConfig", "ScanOut"] {
+        let s = schemas.get(name).unwrap_or_else(|| panic!("schema {name} missing")).to_string();
+        for leak in ["scan_state", "locked_by", "password", "\"token\"", "\"digest\""] {
+            assert!(!s.contains(leak), "{name} exposes {leak}");
+        }
     }
     for scheme in ["session", "csrf", "token"] {
         assert!(spec["components"]["securitySchemes"].get(scheme).is_some(), "{scheme} scheme");

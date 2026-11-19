@@ -6,8 +6,8 @@ use clap::{Parser, Subcommand};
 use st_server::app::{self, AppState, HttpLimits};
 use st_server::audit::{self, AuditEvent};
 use st_server::auth::{Role, session};
-use st_server::config::Config;
-use st_server::{crypto, db, logging, users};
+use st_server::config::{Config, WorkerSettings};
+use st_server::{crypto, db, logging, users, worker};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -21,6 +21,8 @@ struct Cli {
 enum Command {
     /// Run the HTTP API.
     Serve,
+    /// Run server-side scans: the job queue, the scheduler and the reaper.
+    Worker,
     /// Apply database migrations (uses `ST_MIGRATION_DATABASE_URL` if set).
     Migrate,
     /// Recompute the audit log hash chain and report the head hash.
@@ -56,6 +58,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    if let Some(code) = askpass_mode() {
+        std::process::exit(code);
+    }
     let cli = Cli::parse();
 
     match cli.command {
@@ -64,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             gen_data_key();
             return Ok(());
         }
+        Command::Worker => return run_worker().await,
         _ => {}
     }
 
@@ -79,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Command::ResetMfa { username } => reset_mfa(&config, &username).await,
         Command::UnlockUser { username } => unlock_user(&config, &username).await,
-        Command::GenPepper { .. } | Command::GenDataKey => unreachable!("handled above"),
+        Command::GenPepper { .. } | Command::GenDataKey | Command::Worker => unreachable!("handled above"),
     }
 }
 
@@ -101,6 +107,35 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     tracing::info!("shut down");
+    Ok(())
+}
+
+/// The worker runs this binary as git's `GIT_ASKPASS`: git calls it with one argument, the
+/// prompt (`Username for '…': `), and `ST_GIT_ASKPASS_FILE` set. Prompts contain spaces,
+/// subcommand names never do, so a normal invocation is never taken for one.
+fn askpass_mode() -> Option<i32> {
+    std::env::var_os(worker::ASKPASS_FILE_VAR)?;
+    let mut args = std::env::args_os().skip(1);
+    let prompt = args.next()?;
+    if args.next().is_some() || !prompt.to_string_lossy().contains(' ') {
+        return None;
+    }
+    Some(worker::askpass(&prompt))
+}
+
+async fn run_worker() -> anyhow::Result<()> {
+    let settings = WorkerSettings::from_env().context("invalid configuration")?;
+    logging::init(settings.log_format);
+    let pool = db::connect_lazy(&settings.database_url, settings.db_max_connections)?;
+    if settings.worker.allow_local_repos {
+        tracing::warn!("ST_WORKER_ALLOW_LOCAL_REPOS=true: local repositories can be scanned (development only)");
+    }
+    if settings.worker.allow_any_host && settings.worker.allowed_hosts.is_empty() {
+        tracing::warn!("ST_WORKER_ALLOW_ANY_HOST=true: sources may point at any host name");
+    }
+    let worker = worker::Worker::new(pool, std::sync::Arc::new(settings.pepper), settings.worker);
+    worker.run(shutdown_signal()).await?;
+    tracing::info!("worker shut down");
     Ok(())
 }
 

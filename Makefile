@@ -1,5 +1,6 @@
 SHELL := /bin/sh
 SECRETS_DIR := deploy/secrets
+WORKER_DIR := deploy/worker
 TEST_PG := secrettrace-test-pg
 TEST_DB_URL := postgres://postgres:test@127.0.0.1:54329/secrettrace
 
@@ -20,12 +21,17 @@ secrets: ## Generate local secret files (never overwrites existing ones)
 	@[ -s $(SECRETS_DIR)/data_key ] || openssl rand -base64 32 > $(SECRETS_DIR)/data_key
 	@# Files are bind-mounted into containers running as other UIDs; the 0700 directory keeps them private on the host.
 	@chmod 644 $(SECRETS_DIR)/*
+	@# Worker: credential files by name (credential_ref) and ssh host keys. deploy/worker stays
+	@# private on the host (0700); the mounted directories must be readable by the container user.
+	@umask 077; mkdir -p $(WORKER_DIR); chmod 700 $(WORKER_DIR)
+	@mkdir -p $(WORKER_DIR)/git-credentials; chmod 755 $(WORKER_DIR)/git-credentials
+	@[ -e $(WORKER_DIR)/ssh_known_hosts ] || : > $(WORKER_DIR)/ssh_known_hosts; chmod 644 $(WORKER_DIR)/ssh_known_hosts
 	@echo "secrets ready in $(SECRETS_DIR)/ (back up pepper_keys and data_key: losing them invalidates fingerprints / TOTP enrollments)"
 
 build: ## Build release binaries
 	cargo build --release --locked
 
-up: secrets ## Start the stack (postgres, migrate, server)
+up: secrets ## Start the stack (postgres, migrate, server, worker)
 	docker compose up -d --build
 
 down: ## Stop the stack (data volume is kept)

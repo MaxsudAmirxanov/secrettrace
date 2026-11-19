@@ -5,4 +5,5 @@
 *.p12
 deploy/secrets/*
 !deploy/secrets/.gitkeep
+deploy/worker/
 deploy/pki/out/

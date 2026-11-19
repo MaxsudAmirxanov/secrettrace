@@ -37,6 +37,15 @@ use crate::routes;
         routes::ingest::match_digests,
         routes::ingest::findings,
         routes::ingest::complete,
+        routes::sources::list,
+        routes::sources::create,
+        routes::sources::get,
+        routes::sources::update,
+        routes::sources::delete,
+        routes::sources::enqueue_scan,
+        routes::scans::list,
+        routes::scans::get,
+        routes::scans::cancel,
     ),
     modifiers(&SecuritySchemes),
     tags(
@@ -44,6 +53,8 @@ use crate::routes;
         (name = "secrets", description = "Registry of tracked secrets"),
         (name = "api-tokens", description = "Machine credentials for agents and CI (admin)"),
         (name = "ingest", description = "Scan results from agents and CI (API tokens): match digests, report locations"),
+        (name = "sources", description = "Sources to scan: git repositories with schedule and credential reference"),
+        (name = "scans", description = "Scan jobs: server-side (manual, scheduled) and reported by API tokens"),
         (name = "health", description = "Liveness and readiness probes"),
     )
 )]

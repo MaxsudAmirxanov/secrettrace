@@ -3,13 +3,18 @@
 //! The plaintext value is read from a hidden prompt or stdin, never from argv
 //! (argv is visible in `ps` and shell history), normalized and hashed locally,
 //! then zeroized. Only the digest and policy-compliant hints are printed.
+//!
+//! `extract` runs the candidate extractor over local files and prints masked findings;
+//! digests are printed only on explicit request.
 
 use std::io::{IsTerminal as _, Read as _, Write as _};
+use std::path::PathBuf;
 
 use anyhow::{Context as _, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use st_core::{Hints, SecretType, mask, prepare};
+use st_extract::{Candidate, Confidence, Config, Extractor, looks_binary};
 use zeroize::Zeroizing;
 
 #[derive(Parser)]
@@ -33,6 +38,41 @@ enum Command {
         #[arg(long)]
         stdin: bool,
     },
+    /// Show the secret candidates found in files (diagnostic; matching happens on the server).
+    ///
+    /// Prints one JSON object per candidate with location, detector and mask. Plaintext
+    /// is never printed.
+    Extract {
+        /// Files to scan; `-` reads stdin.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Also print digests. They are brute-forceable for weak passwords: do not use in CI logs.
+        #[arg(long)]
+        show_digests: bool,
+        /// Skip context-free high-entropy tokens.
+        #[arg(long)]
+        no_entropy: bool,
+        /// Report only candidates at or above this confidence.
+        #[arg(long, value_enum, default_value_t = CliConfidence::Low)]
+        min_confidence: CliConfidence,
+    },
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl From<CliConfidence> for Confidence {
+    fn from(c: CliConfidence) -> Self {
+        match c {
+            CliConfidence::Low => Self::Low,
+            CliConfidence::Medium => Self::Medium,
+            CliConfidence::High => Self::High,
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -74,7 +114,95 @@ struct DigestOutput {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Digest { secret_type, stdin } => digest(secret_type.into(), stdin),
+        Command::Extract { paths, show_digests, no_entropy, min_confidence } => {
+            ignore_broken_pipe(extract(&paths, show_digests, !no_entropy, min_confidence.into()))
+        }
     }
+}
+
+/// `secrettrace extract … | head` closes the pipe early; that is not an error.
+fn ignore_broken_pipe(result: anyhow::Result<()>) -> anyhow::Result<()> {
+    match result {
+        Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe) => {
+            Ok(())
+        }
+        Err(e)
+            if e.downcast_ref::<serde_json::Error>()
+                .is_some_and(|j| j.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// Largest file read by `extract`; the extractor reports anything beyond as truncated.
+const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Serialize)]
+struct ExtractOutput<'a> {
+    path: String,
+    #[serde(flatten)]
+    candidate: &'a Candidate,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+}
+
+fn extract(paths: &[PathBuf], show_digests: bool, entropy: bool, min_confidence: Confidence) -> anyhow::Result<()> {
+    let extractor = Extractor::new(Config { entropy, ..Config::default() });
+    let mut stdout = std::io::stdout().lock();
+    let mut failed = 0usize;
+    for path in paths {
+        let label = path.display().to_string();
+        let bytes = match read_limited(path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("secrettrace: {label}: {e:#}");
+                failed += 1;
+                continue;
+            }
+        };
+        if looks_binary(&bytes) {
+            eprintln!("secrettrace: {label}: binary, skipped");
+            continue;
+        }
+        let text = Zeroizing::new(String::from_utf8_lossy(&bytes).into_owned());
+        drop(bytes);
+        let result = extractor.extract(&text);
+        if result.truncated {
+            eprintln!("secrettrace: {label}: limits reached, results are partial");
+        }
+        for candidate in result.candidates.iter().filter(|c| c.confidence >= min_confidence) {
+            let out = ExtractOutput {
+                path: label.clone(),
+                candidate,
+                digest: show_digests.then(|| candidate.digest.to_hex()),
+            };
+            serde_json::to_writer(&mut stdout, &out)?;
+            writeln!(stdout)?;
+        }
+    }
+    if failed > 0 {
+        bail!("{failed} file(s) could not be read");
+    }
+    Ok(())
+}
+
+fn read_limited(path: &std::path::Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
+    let mut buf = Zeroizing::new(Vec::new());
+    if path.as_os_str() == "-" {
+        std::io::stdin().take(MAX_FILE_BYTES).read_to_end(&mut buf).context("cannot read stdin")?;
+    } else {
+        if path.is_dir() {
+            bail!("is a directory (recursive scanning arrives with `scan`)");
+        }
+        let file = std::fs::File::open(path).context("cannot open")?;
+        // Pre-size the buffer: growing a Vec frees old copies without zeroizing them.
+        let len = file.metadata().map_or(0, |m| m.len().min(MAX_FILE_BYTES));
+        buf.reserve_exact(usize::try_from(len).unwrap_or(0));
+        file.take(MAX_FILE_BYTES).read_to_end(&mut buf).context("cannot read")?;
+    }
+    Ok(buf)
 }
 
 fn digest(secret_type: SecretType, from_stdin: bool) -> anyhow::Result<()> {

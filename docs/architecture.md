@@ -43,8 +43,9 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 | Крейт | Назначение |
 |---|---|
 | `st-core` | нормализация, digest, hints, маскирование; без сети и без pepper |
+| `st-extract` | извлечение кандидатов из текста, локальный digest; общий для CLI, агентов и воркера |
 | `st-server` | API, воркер, админ-команды (`migrate`, `verify-audit`, `gen-pepper`) |
-| `st-cli` | `secrettrace`: digest сейчас; `register`, `scan git/fs` для CI позже |
+| `st-cli` | `secrettrace`: `digest`, `extract` сейчас; `register`, `scan git/fs` для CI позже |
 
 Очередь в MVP — сам Postgres (`FOR UPDATE SKIP LOCKED` + outbox). NATS JetStream появится на этапе 2 для
 потоковых коллекторов. События использования будут лежать в партиционированной таблице (TimescaleDB при росте).
@@ -96,16 +97,36 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 - Экстракторы `ApiJson` / `ApiQuery` / `ApiPath` превращают любые ошибки разбора в problem+json:
   400 — синтаксис, 415 — тип содержимого, 422 — схема, 413 — размер.
 
-## 6. Ошибки API
+## 6. Извлечение кандидатов
+
+Матчинг идёт по точному равенству digest, поэтому задача экстрактора — полнота, а не точность: лишний кандидат
+стоит одного SHA-256 и места в запросе `/match`. Точность выражена отдельно, полем `confidence`. Оно понадобится
+для отчётов о незарегистрированных секретах.
+
+- **Конвейер** (`st_extract::Extractor::extract`): известные форматы → PEM/SSH → URL userinfo → key=value
+  (присваивания, флаги, XML, `.netrc`, `Authorization`) → экранированные JSON-строки → энтропия и base64.
+  Каждое найденное значение проходит `st_core::normalize` для своего типа, затем вычисляется digest.
+  Открытый текст живёт только в `Zeroizing`-буферах и в `Candidate` не попадает.
+- **Дедупликация.** Если одно и то же значение найдено в перекрывающихся местах, остаётся первый детектор
+  по приоритету. Поэтому `ghp_…` внутри `Authorization: Bearer` помечается как `known/github_token`.
+- **Рекурсия.** Декодированный текст сканируется как отдельный документ с `Frame`, который отображает
+  смещения на внешний фрагмент. Глубина ограничена 3, объём декодирования — `max(4 × вход, 1 МиБ)`.
+- **Границы токенов** проверяются вручную, потому что в `regex` нет look-around: `xAKIA…` и токен длиннее
+  формата отбрасываются.
+- **Отказ от регулярок с backtracking** гарантирует линейное время. Отдельно разобраны квадратичные
+  сценарии: поиск `END` для каждого `BEGIN` и сканирование хвоста значения ограничены окном.
+- **Вывод CLI** не содержит digest без явного флага: digest слабого пароля перебирается офлайн.
+
+## 7. Ошибки API
 
 `application/problem+json`, поле `type` — стабильный URN: `urn:secrettrace:problem:{bad-request|unauthorized|
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
-## 7. Схема БД
+## 8. Схема БД
 См. `migrations/0001_core.sql` и `0002_auth.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
 `scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
 
-## 8. План MVP
+## 9. План MVP
 
 | # | Задача | Статус |
 |---|---|---|
@@ -115,7 +136,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 3 | `st-core`: normalize/digest/hints/mask + тест-векторы; pepper и fingerprint на сервере | ✅ |
 | 4 | Auth: argon2id, сессии, обязательный TOTP, CSRF, lockout, API-токены, RBAC, `create-user` | ✅ |
 | 5 | API реестра секретов + allow-rules + аудит, OpenAPI (utoipa) | ✅ |
-| 6 | Извлечение кандидатов: known formats, kv, URL userinfo, PEM, high-entropy; декодеры base64/url/json | |
+| 6 | Извлечение кандидатов: known formats, kv, URL userinfo, PEM, high-entropy; декодеры base64/url/json | ✅ |
 | 7 | Источники-плагины: filesystem, git (уникальные blob'ы + `--find-object`) | |
 | 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | |
 | 9 | Воркер: очередь, планировщик, клонирование по `credential_ref` | |

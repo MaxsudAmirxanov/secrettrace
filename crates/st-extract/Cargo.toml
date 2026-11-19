@@ -1,0 +1,21 @@
+[package]
+name = "st-extract"
+description = "SecretTrace candidate extraction: finds secret-shaped values in text and digests them locally"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+st-core.workspace = true
+
+base64.workspace = true
+regex.workspace = true
+serde.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

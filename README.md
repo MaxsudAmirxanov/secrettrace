@@ -93,6 +93,11 @@ make audit        # cargo audit
 - `crates/st-server/tests/openapi.rs`: закоммиченный `docs/openapi.json` совпадает с кодом; у всех закрытых
   операций объявлена авторизация, у изменяющих — CSRF; схемы ответов не содержат digest и отпечатков.
   Перегенерировать спецификацию: `UPDATE_OPENAPI=1 cargo test -p st-server --test openapi`.
+- `crates/st-extract/tests/extract.rs`: образец для каждого правила известных форматов и отказ на склеенных
+  токенах, `.env`, Kubernetes Secret с вложенными base64 и JSON, Docker `auth`, заголовки `Authorization`,
+  исходный код, XML, `.netrc`, ADO.NET, JDBC, экранированный PEM в JSON сервисного аккаунта, отсутствие
+  открытых значений и digest в выводе, лимиты, линейное время на патологических входах, случайные входы.
+- `crates/st-cli/tests/cli.rs`: `digest` и `extract` как чёрный ящик; digest печатается только по флагу.
 - `crates/st-server/tests/auth.rs`: полный вход с привязкой TOTP, ротация сессии после MFA, хранение seed
   только в зашифрованном виде, повторное использование кода, CSRF, одинаковые ответы и блокировка,
   rate-limit, роли, выпуск, проверка и отзыв API-токенов, отсутствие токенов и имён в аудите, сброс MFA.
@@ -141,6 +146,37 @@ secrettrace digest --type private-key --stdin < key.pem
 по политике подсказки и маска, например `AKIA…`. Значение нельзя передать аргументом: argv виден в `ps`
 и истории shell.
 
+## CLI: какие кандидаты видит сканер
+
+```sh
+secrettrace extract .env k8s/secret.yaml           # JSON Lines: путь, строка, детектор, маска
+secrettrace extract --min-confidence medium -  < build.log
+```
+
+Это диагностическая команда для локальной проверки. Открытые значения она не печатает никогда, digest —
+только с `--show-digests` (не используйте её в логах CI: digest слабого пароля можно подобрать). Сравнение
+с реестром появится вместе с ingest на этапе 8. Что и как находится:
+
+| Детектор | Примеры | Уверенность |
+|---|---|---|
+| `known` | `AKIA…`, `ghp_…`, `github_pat_…`, `glpat-…`, `xoxb-…`, `sk_live_…`, `AIza…`, `sk-ant-…`, JWT, токен Telegram-бота — 24 правила | high |
+| `pem`, `ssh_public_key` | приватные ключи (high), сертификаты и публичные ключи (low): их отслеживают ради графа распространения | high / low |
+| `url_password`, `url` | `postgres://app:p%40ss@db/app`: пароль (и его `%`-декодированная форма) и вся строка подключения | medium |
+| `key_value` | `DB_PASSWORD=…`, `"apiKey": "…"`, `--password '…'`, `<password>…</password>`, `.netrc`, `Server=…;Password=…;` | medium |
+| `auth_header`, `basic_auth` | `Authorization: Bearer …`, пароль из `Basic base64(user:pass)` и Docker `auth` | medium |
+| `high_entropy` | случайные токены без контекста (буквы и цифры, энтропия ≥ 3.5 бит, hex ≥ 3.0) | low |
+
+- **Декодеры** работают рекурсивно до трёх уровней: base64 (data в Kubernetes Secret), `%XX`, JSON-экранирование
+  (`{\"password\":\"…\"}` в логах). Место находки указывает на внешний закодированный фрагмент,
+  цепочка декодирований записывается в `encodings`.
+- **Ключи** считаются чувствительными по имени: `password`, `pwd`, `secret`, `token`, `api_key`, `auth`, `dsn`…
+  Метаданные (`password_file`, `token_uri`, `secret_name`) и шаблоны (`${VAR}`, `{{ … }}`, `<your-token>`)
+  пропускаются. Значения, похожие на идентификатор в коде (`password: SecretString`), digest'ируются, но получают
+  уверенность low.
+- **Нормализация** та же, что при регистрации (`st-core`), поэтому совпадение — это просто равенство digest.
+- **Ограничения:** до 16 МиБ на документ и 10 000 кандидатов; бюджет на декодирование. Время работы линейное:
+  у `regex` нет backtracking, а PEM-блоки сопоставляются в один проход.
+
 ## Конфигурация
 
 Все переменные описаны в [.env.example](.env.example). Любую чувствительную переменную `ST_X` можно
@@ -167,8 +203,9 @@ secrettrace digest --type private-key --stdin < key.pem
 
 ```
 crates/st-core     нормализация, digest, hints, маскирование (общее для сервера и клиентов)
+crates/st-extract  извлечение кандидатов из текста и локальный digest (без сети и pepper)
 crates/st-server   API (axum), авторизация, админ-команды, аудит, pepper
-crates/st-cli      CLI `secrettrace`
+crates/st-cli      CLI `secrettrace`: `digest`, `extract`
 migrations/        SQL-миграции (встраиваются в бинарник)
 testdata/          общие тест-векторы digest (эталон посчитан независимой реализацией на Python)
 deploy/            init-скрипт Postgres, секреты (gitignored)

@@ -395,6 +395,356 @@
         ]
       }
     },
+    "/api/v1/ingest/scans": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Start a scan of a source (found or created by type and URI). Scope `ingest:profile`.",
+        "operationId": "start",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanStarted"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Token lacks ingest:profile",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Source is disabled",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ingest/scans/{id}/complete": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Finish a scan. A successful full scan marks the source's unreported locations as no\nlonger present. Scope `ingest:profile`.",
+        "operationId": "complete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Scan id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScanComplete"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScanCompleted"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such scan for this token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scan is not running",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ingest/scans/{id}/findings": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Report locations of matched candidates. Digests are matched again; unregistered ones\nare counted and dropped. Scope `ingest:findings`.",
+        "operationId": "findings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Scan id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FindingsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FindingsResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such scan for this token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scan is not running",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "token": []
+          }
+        ]
+      }
+    },
+    "/api/v1/ingest/scans/{id}/match": {
+      "post": {
+        "tags": [
+          "ingest"
+        ],
+        "summary": "Which of the submitted digests are registered. Rate-limited per token by unique\ndigests; only counts are audited. Scope `ingest:match`.",
+        "operationId": "match_digests",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Scan id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MatchResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such scan for this token",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Scan is not running",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "token": []
+          }
+        ]
+      }
+    },
     "/api/v1/secrets": {
       "get": {
         "tags": [
@@ -889,6 +1239,21 @@
           }
         }
       },
+      "CompletionStatus": {
+        "type": "string",
+        "enum": [
+          "succeeded",
+          "failed"
+        ]
+      },
+      "Confidence": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
       "CreateTokenRequest": {
         "type": "object",
         "required": [
@@ -944,6 +1309,29 @@
           }
         ]
       },
+      "Detector": {
+        "type": "string",
+        "description": "Detector that produced a candidate (mirrors `st_extract::Detector`).",
+        "enum": [
+          "known",
+          "pem",
+          "ssh_public_key",
+          "url_password",
+          "url",
+          "key_value",
+          "auth_header",
+          "basic_auth",
+          "high_entropy"
+        ]
+      },
+      "Encoding": {
+        "type": "string",
+        "enum": [
+          "base64",
+          "percent",
+          "json_string"
+        ]
+      },
       "EnrollResponse": {
         "type": "object",
         "required": [
@@ -956,6 +1344,144 @@
           },
           "secret": {
             "type": "string"
+          }
+        }
+      },
+      "FindingIn": {
+        "type": "object",
+        "description": "One location of a candidate. Only metadata: never the value or file contents.",
+        "required": [
+          "digest",
+          "path",
+          "in_current_state",
+          "detector",
+          "confidence"
+        ],
+        "properties": {
+          "blob": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Git blob id (40 or 64 lowercase hex)."
+          },
+          "column": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 1
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Git commit id (40 or 64 lowercase hex)."
+          },
+          "confidence": {
+            "$ref": "#/components/schemas/Confidence"
+          },
+          "detector": {
+            "$ref": "#/components/schemas/Detector"
+          },
+          "digest": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "encodings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Encoding"
+            }
+          },
+          "in_current_state": {
+            "type": "boolean"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Name of the key the value was assigned to, 1-64 of `[A-Za-z0-9_.:-]`."
+          },
+          "line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 1
+          },
+          "path": {
+            "type": "string",
+            "description": "Path inside the source (relative), 1-1024 bytes."
+          },
+          "rule": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Known-format rule id, 1-64 of `[a-z0-9_]`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "FindingsRequest": {
+        "type": "object",
+        "required": [
+          "findings"
+        ],
+        "properties": {
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindingIn"
+            },
+            "maxItems": 5000,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "FindingsResponse": {
+        "type": "object",
+        "required": [
+          "accepted",
+          "ignored",
+          "new_locations",
+          "updated_locations",
+          "violations"
+        ],
+        "properties": {
+          "accepted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Findings whose digest is registered.",
+            "minimum": 0
+          },
+          "ignored": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Findings whose digest is not registered (nothing stored).",
+            "minimum": 0
+          },
+          "new_locations": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "updated_locations": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "violations": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Accepted locations not covered by an allow rule.",
+            "minimum": 0
           }
         }
       },
@@ -1079,6 +1605,39 @@
           },
           "mfa_required": {
             "type": "boolean"
+          }
+        }
+      },
+      "MatchRequest": {
+        "type": "object",
+        "required": [
+          "digests"
+        ],
+        "properties": {
+          "digests": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Client-side digests (64 lowercase hex); duplicates are ignored.",
+            "maxItems": 10000,
+            "minItems": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "MatchResponse": {
+        "type": "object",
+        "required": [
+          "matched"
+        ],
+        "properties": {
+          "matched": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The submitted digests that are registered, sorted. Names and ids are never returned."
           }
         }
       },
@@ -1327,6 +1886,125 @@
           "admin"
         ]
       },
+      "ScanComplete": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Short failure reason (≤ 500 chars). Never file contents."
+          },
+          "stats": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Counters only: up to 32 keys of `[a-z0-9_]`, non-negative integers.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "$ref": "#/components/schemas/CompletionStatus"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ScanCompleted": {
+        "type": "object",
+        "required": [
+          "status",
+          "no_longer_present"
+        ],
+        "properties": {
+          "no_longer_present": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Locations of the source marked as no longer in its current state (full scans).",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/CompletionStatus"
+          }
+        }
+      },
+      "ScanLimits": {
+        "type": "object",
+        "required": [
+          "max_digests_per_request",
+          "max_findings_per_request",
+          "digests_per_hour"
+        ],
+        "properties": {
+          "digests_per_hour": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_digests_per_request": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "max_findings_per_request": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "ScanStart": {
+        "type": "object",
+        "required": [
+          "source"
+        ],
+        "properties": {
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "1-64 chars of `[A-Za-z0-9._-]`; matched exactly by allow rules."
+          },
+          "full": {
+            "type": "boolean",
+            "description": "The scan covers the whole current state of the source: on success, locations it did\nnot report are marked as no longer present."
+          },
+          "source": {
+            "$ref": "#/components/schemas/SourceRef"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ScanStarted": {
+        "type": "object",
+        "required": [
+          "scan_id",
+          "source_id",
+          "limits"
+        ],
+        "properties": {
+          "limits": {
+            "$ref": "#/components/schemas/ScanLimits"
+          },
+          "scan_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "source_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "SecretCreate": {
         "type": "object",
         "description": "Registration request. `digest` is computed client-side (`secrettrace digest`\nor the web UI); the plaintext value is never sent.",
@@ -1537,6 +2215,23 @@
         },
         "additionalProperties": false
       },
+      "SourceRef": {
+        "type": "object",
+        "required": [
+          "type",
+          "uri"
+        ],
+        "properties": {
+          "type": {
+            "$ref": "#/components/schemas/SourceType"
+          },
+          "uri": {
+            "type": "string",
+            "description": "Repository URL, host path, image reference… Must not contain credentials."
+          }
+        },
+        "additionalProperties": false
+      },
       "SourceType": {
         "type": "string",
         "enum": [
@@ -1661,6 +2356,10 @@
     {
       "name": "api-tokens",
       "description": "Machine credentials for agents and CI (admin)"
+    },
+    {
+      "name": "ingest",
+      "description": "Scan results from agents and CI (API tokens): match digests, report locations"
     },
     {
       "name": "health",

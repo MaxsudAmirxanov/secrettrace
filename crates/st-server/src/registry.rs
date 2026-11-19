@@ -581,6 +581,8 @@ pub async fn update(
     if let Some(rules) = &rules {
         sqlx::query("DELETE FROM secret_allow_rules WHERE secret_id = $1").bind(id).execute(&mut **conn).await?;
         insert_rules(conn, id, rules).await?;
+        // Deleting the old rules nulled `allow_rule_id` but left `is_allowed` stale.
+        crate::policy::reevaluate(conn, id).await?;
     }
 
     let mut changed = Vec::new();

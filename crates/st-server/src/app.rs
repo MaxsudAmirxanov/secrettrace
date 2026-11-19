@@ -22,9 +22,14 @@ use crate::auth::AuthSettings;
 use crate::auth::ratelimit::AuthLimiters;
 use crate::crypto::{DataKey, Pepper};
 use crate::error::{ApiError, Problem, problem_response};
+use crate::ingest::IngestLimiter;
+pub use crate::ingest::IngestLimits;
 use crate::routes;
 
 static REQUEST_ID: HeaderName = HeaderName::from_static("x-request-id");
+
+/// Body limit of `/ingest/scans/{id}/findings` when `ST_MAX_BODY_BYTES` is smaller.
+pub const FINDINGS_MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct AppState {
@@ -33,6 +38,8 @@ pub struct AppState {
     pub data_key: Arc<DataKey>,
     pub auth: Arc<AuthSettings>,
     pub limiters: Arc<AuthLimiters>,
+    /// Per-token limits of `/ingest/…/match`.
+    pub ingest: Arc<IngestLimiter>,
 }
 
 impl AppState {
@@ -44,7 +51,15 @@ impl AppState {
             data_key: Arc::new(data_key),
             auth: Arc::new(auth),
             limiters: Arc::new(AuthLimiters::default()),
+            ingest: Arc::new(IngestLimiter::default()),
         }
+    }
+
+    /// Replace the default ingest limits (configuration, tests).
+    #[must_use]
+    pub fn with_ingest_limits(mut self, limits: IngestLimits) -> Self {
+        self.ingest = Arc::new(IngestLimiter::new(limits));
+        self
     }
 }
 
@@ -66,6 +81,15 @@ pub fn router(state: AppState, limits: HttpLimits) -> Router {
         .route("/secrets", get(routes::secrets::list).post(routes::secrets::create))
         .route("/secrets/{id}", get(routes::secrets::get).patch(routes::secrets::update))
         .route("/secrets/{id}/locations", get(routes::secrets::locations))
+        .route("/ingest/scans", post(routes::ingest::start))
+        .route("/ingest/scans/{id}/match", post(routes::ingest::match_digests))
+        // 5000 findings do not fit the default 1 MiB; this route alone gets more.
+        .route(
+            "/ingest/scans/{id}/findings",
+            post(routes::ingest::findings)
+                .layer(DefaultBodyLimit::max(limits.max_body_bytes.max(FINDINGS_MAX_BODY_BYTES))),
+        )
+        .route("/ingest/scans/{id}/complete", post(routes::ingest::complete))
         .route("/openapi.json", get(openapi_json));
 
     Router::new()

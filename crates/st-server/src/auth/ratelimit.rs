@@ -1,4 +1,4 @@
-//! In-process fixed-window rate limiter for authentication endpoints.
+//! In-process fixed-window rate limiter for authentication and ingest endpoints.
 //!
 //! Complements the per-account lockout stored in the database: the limiter slows
 //! down spraying across many usernames from one IP and keeps argon2 work bounded.
@@ -31,6 +31,35 @@ impl RateLimiter {
 
     fn check_at(&self, key: &str, now: Instant) -> bool {
         let mut buckets = self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = self.bucket(&mut buckets, key, now);
+        entry.1 = entry.1.saturating_add(1);
+        entry.1 <= self.max
+    }
+
+    /// Spend `n` units (e.g. digests) for `key`. Unlike [`RateLimiter::check`], a refused
+    /// request consumes nothing, so one oversized batch does not lock the key out.
+    pub fn check_n(&self, key: &str, n: u32) -> bool {
+        self.check_n_at(key, n, Instant::now())
+    }
+
+    fn check_n_at(&self, key: &str, n: u32, now: Instant) -> bool {
+        let mut buckets = self.buckets.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = self.bucket(&mut buckets, key, now);
+        match entry.1.checked_add(n) {
+            Some(total) if total <= self.max => {
+                entry.1 = total;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn bucket<'b>(
+        &self,
+        buckets: &'b mut HashMap<String, (Instant, u32)>,
+        key: &str,
+        now: Instant,
+    ) -> &'b mut (Instant, u32) {
         if buckets.len() >= PRUNE_THRESHOLD {
             buckets.retain(|_, (start, _)| now.duration_since(*start) < self.window);
         }
@@ -38,8 +67,7 @@ impl RateLimiter {
         if now.duration_since(entry.0) >= self.window {
             *entry = (now, 0);
         }
-        entry.1 = entry.1.saturating_add(1);
-        entry.1 <= self.max
+        entry
     }
 }
 
@@ -75,5 +103,17 @@ mod tests {
         assert!(!rl.check_at("a", t0));
         assert!(rl.check_at("b", t0), "keys are independent");
         assert!(rl.check_at("a", t0 + Duration::from_secs(61)), "window resets");
+    }
+
+    #[test]
+    fn weighted_spending() {
+        let rl = RateLimiter::new(100, Duration::from_secs(3600));
+        let t0 = Instant::now();
+        assert!(rl.check_n_at("t", 60, t0));
+        assert!(!rl.check_n_at("t", 41, t0), "would exceed");
+        assert!(rl.check_n_at("t", 40, t0), "the refused batch consumed nothing");
+        assert!(!rl.check_n_at("t", 1, t0));
+        assert!(!rl.check_n_at("u", u32::MAX, t0), "no overflow");
+        assert!(rl.check_n_at("t", 100, t0 + Duration::from_secs(3601)), "window resets");
     }
 }

@@ -35,6 +35,8 @@ pub struct Config {
     pub log_format: LogFormat,
     pub request_timeout: Duration,
     pub max_body_bytes: usize,
+    /// Unique digests one API token may submit to `/ingest/…/match` per hour.
+    pub ingest_digests_per_hour: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -98,6 +100,15 @@ impl Config {
             },
             request_timeout: Duration::from_secs(env.parse_or("ST_REQUEST_TIMEOUT_SECS", 30)?),
             max_body_bytes: env.parse_or("ST_MAX_BODY_BYTES", 1024 * 1024)?,
+            ingest_digests_per_hour: match env.parse_or("ST_INGEST_DIGESTS_PER_HOUR", 200_000u32)? {
+                0 => {
+                    return Err(ConfigError::Invalid {
+                        var: "ST_INGEST_DIGESTS_PER_HOUR",
+                        reason: "must be at least 1".into(),
+                    });
+                }
+                n => n,
+            },
         })
     }
 }
@@ -199,6 +210,7 @@ mod tests {
         assert!(c.auth.cookie_secure, "cookies are Secure by default");
         assert_eq!(c.auth.session_idle, Duration::from_secs(1800));
         assert!(c.auth.trusted_proxies.is_empty());
+        assert_eq!(c.ingest_digests_per_hour, 200_000);
     }
 
     #[test]
@@ -263,5 +275,9 @@ mod tests {
         let mut v = base();
         v.push(("ST_DB_MAX_CONNECTIONS", "many"));
         assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_DB_MAX_CONNECTIONS", .. }));
+
+        let mut v = base();
+        v.push(("ST_INGEST_DIGESTS_PER_HOUR", "0"));
+        assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_INGEST_DIGESTS_PER_HOUR", .. }));
     }
 }

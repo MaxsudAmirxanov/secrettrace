@@ -158,3 +158,36 @@ pub async fn logged_in(pool: &PgPool, app: &Router, username: &str, role: Role) 
     login_and_enroll(&mut c, username).await;
     c
 }
+
+/// Router with a custom body limit (the default test router allows 64 KiB).
+pub fn router_with_body_limit(state: AppState, max_body_bytes: usize) -> Router {
+    let limits = HttpLimits { request_timeout: Duration::from_secs(30), max_body_bytes };
+    app::router(state, limits).layer(MockConnectInfo(SocketAddr::from(([10, 0, 0, 7], 40000))))
+}
+
+/// Issue an API token through the admin API; returns `(token, id)`.
+pub async fn issue_token(admin: &mut Client, name: &str, kind: &str, scopes: &[&str]) -> (String, String) {
+    let req = json!({ "name": name, "kind": kind, "scopes": scopes, "expires_in_days": 30 });
+    let r = admin.call(Method::POST, "/api/v1/api-tokens", Some(req)).await;
+    assert_eq!(r.status, StatusCode::CREATED, "{}", r.body);
+    (r.body["token"].as_str().unwrap().to_owned(), r.body["id"].as_str().unwrap().to_owned())
+}
+
+/// A machine request: `Authorization: Bearer <token>`, no cookies, no CSRF.
+pub async fn bearer(app: &Router, method: Method, path: &str, token: Option<&str>, body: Option<Value>) -> Resp {
+    let mut req = Request::builder().method(method).uri(path);
+    if let Some(t) = token {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let req = match body {
+        Some(b) => req.header(header::CONTENT_TYPE, "application/json").body(Body::from(b.to_string())),
+        None => req.body(Body::empty()),
+    }
+    .unwrap();
+    let resp = app.clone().oneshot(req).await.unwrap();
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+    let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    Resp { status, body, headers }
+}

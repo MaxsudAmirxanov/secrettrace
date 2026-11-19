@@ -9,6 +9,7 @@ pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod extract;
+pub mod ingest;
 pub mod logging;
 pub mod model;
 pub mod openapi;

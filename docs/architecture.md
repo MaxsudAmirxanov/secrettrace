@@ -149,16 +149,55 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   незатёртую копию), декодирование в текст переносит буфер без копирования, буфер чтения из `cat-file`
   затирается. Сам процесс git и ядро (pipe) держат копии, которые мы контролировать не можем.
 
-## 8. Ошибки API
+## 8. Ingest
+
+Четыре вызова на скан: `scans` (старт) → `match` → `findings` → `complete`, все только по API-токену
+со своим scope. Каждый обработчик — одна транзакция вместе с записью аудита; строка `scan_jobs`
+блокируется `FOR UPDATE`, поэтому параллельные `findings` и `complete` одного скана сериализуются.
+
+- **Скан** принадлежит токену (`scan_jobs.api_token_id`); чужой или несуществующий id дают одинаковый 404.
+  Работать со сканом можно, пока он `running` и моложе 24 часов, иначе 409.
+- **Матчинг.** Для каждого уникального digest'а вычисляются отпечатки всех версий pepper, затем один запрос
+  `UNNEST(idx, version, fp) JOIN secrets`. Статус секрета не важен.
+- **Лимиты.** `/match` и `/findings` делят взвешенный бюджет (`RateLimiter::check_n`): уникальные digest'ы
+  в час на токен (`ST_INGEST_DIGESTS_PER_HOUR`) и запросы в минуту; иначе `/findings` стал бы оракулом
+  в обход лимита `/match`. Старты сканов — 30 в минуту на токен. Отказ не расходует бюджет, проверка скана
+  идёт до лимитера. Окно фиксированное (на стыке окон возможен двойной бюджет), лимитер живёт в процессе:
+  при нескольких репликах лимит умножается на их число.
+- **Проверка URI** отвергает userinfo после любой смеси `/` и `\` за `scheme:`, `user:pass@` без схемы
+  и параметры query/fragment с именами вроде `token`, `password`, `key`, `signature`.
+- **Ошибки 422** не возвращают присланное: значения и неизвестные имена полей в сообщениях serde заменяются
+  на `…` (`extract::redact_input`).
+- **Блокировки.** `/findings` берёт `FOR SHARE` на совпавшие секреты до чтения allow-правил (гонка с заменой
+  правил), находки сортируются по `(secret_id, locator_key)`, `reevaluate` блокирует места `ORDER BY id`.
+  Лимит тела у `/findings` — `max(ST_MAX_BODY_BYTES, 8 МиБ)`, чтобы помещались 5000 находок.
+- **Идентичность места.** `locator_key = SHA-256("secrettrace/location/v1\0" || lp(source_type) || lp(uri) ||
+  lp(path))`, `lp` — длина 4 байта big-endian и байты. Дубликаты в одном запросе сливаются до `INSERT`,
+  потому что `ON CONFLICT` не может обновить одну строку дважды. Новые и обновлённые места различаются
+  через `RETURNING (xmax = 0)`.
+- **`in_current_state`.** Внутри одного скана — OR по всем находкам пути; находка из нового скана заменяет
+  значение. `locator` берётся от версии из текущего состояния. Успешный полный скан снимает флаг с мест
+  источника, которых он не видел (`no_longer_present`), но только с тех, что раньше сообщал тот же токен
+  и что старше начала скана (`last_seen < started_at`). Скан старше 24 часов можно лишь завершить как `failed`.
+- **Известное ограничение:** токен сам выбирает `environment` скана и может подогнать его под allow-правило.
+  Закрывается привязкой токена к источнику на этапе 13.
+- **Allow-правила** (`policy::allow`): все заданные поля правила должны совпасть, побеждает правило
+  с меньшим id. При замене правил `policy::reevaluate` пересчитывает места секрета в той же транзакции:
+  удаление старых правил обнуляет `allow_rule_id` через `ON DELETE SET NULL`, но `is_allowed` пересчитать
+  может только код.
+- **Аудит**: `ingest.scan_start`, `ingest.match`, `ingest.findings`, `ingest.scan_complete` от имени токена;
+  в деталях только счётчики и id. Алерты на новые нарушения — этап 10.
+
+## 9. Ошибки API
 
 `application/problem+json`, поле `type` — стабильный URN: `urn:secrettrace:problem:{bad-request|unauthorized|
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
-## 9. Схема БД
-См. `migrations/0001_core.sql` и `0002_auth.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
+## 10. Схема БД
+См. `migrations/0001_core.sql`, `0002_auth.sql` и `0003_ingest.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
 `scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
 
-## 10. План MVP
+## 11. План MVP
 
 | # | Задача | Статус |
 |---|---|---|
@@ -170,7 +209,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 5 | API реестра секретов + allow-rules + аудит, OpenAPI (utoipa) | ✅ |
 | 6 | Извлечение кандидатов: known formats, kv, URL userinfo, PEM, high-entropy; декодеры base64/url/json | ✅ |
 | 7 | Источники-плагины: filesystem, git (уникальные blob'ы + `--find-object`) | ✅ |
-| 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | |
+| 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | ✅ |
 | 9 | Воркер: очередь, планировщик, клонирование по `credential_ref` | |
 | 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |
 | 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | |

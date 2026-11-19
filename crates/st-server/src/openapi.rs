@@ -33,12 +33,17 @@ use crate::routes;
         routes::secrets::get,
         routes::secrets::update,
         routes::secrets::locations,
+        routes::ingest::start,
+        routes::ingest::match_digests,
+        routes::ingest::findings,
+        routes::ingest::complete,
     ),
     modifiers(&SecuritySchemes),
     tags(
         (name = "auth", description = "Password + mandatory TOTP login, sessions"),
         (name = "secrets", description = "Registry of tracked secrets"),
         (name = "api-tokens", description = "Machine credentials for agents and CI (admin)"),
+        (name = "ingest", description = "Scan results from agents and CI (API tokens): match digests, report locations"),
         (name = "health", description = "Liveness and readiness probes"),
     )
 )]

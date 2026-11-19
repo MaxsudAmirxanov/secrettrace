@@ -88,7 +88,8 @@ async fn serve(config: Config) -> anyhow::Result<()> {
     if !config.auth.cookie_secure {
         tracing::warn!("ST_COOKIE_SECURE=false: session cookies are sent over plain HTTP (development only)");
     }
-    let state = AppState::new(pool, config.pepper, config.data_key, config.auth);
+    let ingest = app::IngestLimits { digests_per_hour: config.ingest_digests_per_hour, ..app::IngestLimits::default() };
+    let state = AppState::new(pool, config.pepper, config.data_key, config.auth).with_ingest_limits(ingest);
     let limits = HttpLimits { request_timeout: config.request_timeout, max_body_bytes: config.max_body_bytes };
     let router = app::router(state, limits);
 

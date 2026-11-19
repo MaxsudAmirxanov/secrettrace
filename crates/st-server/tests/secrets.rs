@@ -324,3 +324,57 @@ async fn locations_and_violation_counts(pool: PgPool) {
     let missing = viewer.call(Method::GET, &format!("/api/v1/secrets/{}/locations", uuid::Uuid::new_v4()), None).await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
+
+#[sqlx::test(migrator = "st_server::db::MIGRATOR")]
+async fn replacing_allow_rules_reevaluates_existing_locations(pool: PgPool) {
+    let app = router(state(pool.clone()));
+    let mut op = logged_in(&pool, &app, "op", Role::Operator).await;
+    let id = register(&mut op, register_body("reeval", SecretType::ApiKey, AWS_KEY)).await.body["id"]
+        .as_str()
+        .unwrap()
+        .parse::<uuid::Uuid>()
+        .unwrap();
+    for (key, path) in [(1u8, "sealed/a.yaml"), (2, ".env")] {
+        sqlx::query(
+            "INSERT INTO locations (secret_id, source_type, uri, locator, locator_key, in_current_state, is_allowed)
+             VALUES ($1, 'git_repo', 'git@github.com:acme/app.git', $2, $3, true, false)",
+        )
+        .bind(id)
+        .bind(json!({ "path": path, "line": 1 }))
+        .bind(vec![key; 32])
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let url = format!("/api/v1/secrets/{id}");
+    assert_eq!(op.call(Method::GET, &url, None).await.body["violation_count"], 2);
+
+    let rules = json!({ "allow_rules": [
+        { "uri_pattern": "git@github.com:acme/*", "path_pattern": "sealed/**" },
+        { "uri_pattern": "**", "environment": "prod" }
+    ] });
+    let r = op.call(Method::PATCH, &url, Some(rules)).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["violation_count"], 1);
+    let rule_id = r.body["allow_rules"][0]["id"].as_i64().unwrap();
+    let state: Vec<(String, bool, Option<i64>)> = sqlx::query_as(
+        "SELECT locator->>'path', is_allowed, allow_rule_id FROM locations WHERE secret_id = $1 ORDER BY 1",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    // The env-scoped catch-all does not apply: these locations have no environment.
+    assert_eq!(state, vec![(".env".into(), false, None), ("sealed/a.yaml".into(), true, Some(rule_id))]);
+
+    // Removing all rules turns the allowed location back into a violation.
+    let r = op.call(Method::PATCH, &url, Some(json!({ "allow_rules": [] }))).await;
+    assert_eq!(r.status, StatusCode::OK, "{}", r.body);
+    assert_eq!(r.body["violation_count"], 2);
+    let allowed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM locations WHERE is_allowed OR allow_rule_id IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(allowed, 0);
+}

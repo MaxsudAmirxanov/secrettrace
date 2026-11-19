@@ -10,6 +10,7 @@ paths = [
   '''^crates/st-core/src/(normalize|hints|digest|masking)\.rs$''',
   '''^crates/st-core/tests/''',
   '''^crates/st-extract/(src|tests)/''',
+  '''^crates/st-source/tests/''',
   '''^crates/st-cli/tests/''',
   '''^crates/st-server/src/(config|crypto/pepper)\.rs$''',
   '''^crates/st-server/tests/''',

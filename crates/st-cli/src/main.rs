@@ -4,14 +4,16 @@
 //! (argv is visible in `ps` and shell history), normalized and hashed locally,
 //! then zeroized. Only the digest and policy-compliant hints are printed.
 //!
-//! `extract` runs the candidate extractor over local files and prints masked findings;
+//! `extract` and `scan` run the candidate extractor locally and print masked findings;
 //! digests are printed only on explicit request.
+
+mod scan;
 
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::path::PathBuf;
 
 use anyhow::{Context as _, bail};
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use st_core::{Hints, SecretType, mask, prepare};
 use st_extract::{Candidate, Confidence, Config, Extractor, looks_binary};
@@ -46,16 +48,37 @@ enum Command {
         /// Files to scan; `-` reads stdin.
         #[arg(required = true)]
         paths: Vec<PathBuf>,
-        /// Also print digests. They are brute-forceable for weak passwords: do not use in CI logs.
-        #[arg(long)]
-        show_digests: bool,
-        /// Skip context-free high-entropy tokens.
-        #[arg(long)]
-        no_entropy: bool,
-        /// Report only candidates at or above this confidence.
-        #[arg(long, value_enum, default_value_t = CliConfidence::Low)]
-        min_confidence: CliConfidence,
+        #[command(flatten)]
+        output: OutputArgs,
     },
+    /// Scan a directory tree or a git history locally and print masked candidates (JSON Lines).
+    ///
+    /// A summary goes to stderr. The command fails if some files could not be read, so a
+    /// partial scan is never mistaken for a clean one.
+    Scan {
+        #[command(subcommand)]
+        target: scan::Target,
+    },
+}
+
+/// Output options shared by `extract` and `scan`.
+#[derive(Args)]
+struct OutputArgs {
+    /// Also print digests. They are brute-forceable for weak passwords: do not use in CI logs.
+    #[arg(long)]
+    show_digests: bool,
+    /// Skip context-free high-entropy tokens.
+    #[arg(long)]
+    no_entropy: bool,
+    /// Report only candidates at or above this confidence.
+    #[arg(long, value_enum, default_value_t = CliConfidence::Low)]
+    min_confidence: CliConfidence,
+}
+
+impl OutputArgs {
+    fn extractor(&self) -> Extractor {
+        Extractor::new(Config { entropy: !self.no_entropy, ..Config::default() })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -114,9 +137,8 @@ struct DigestOutput {
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Digest { secret_type, stdin } => digest(secret_type.into(), stdin),
-        Command::Extract { paths, show_digests, no_entropy, min_confidence } => {
-            ignore_broken_pipe(extract(&paths, show_digests, !no_entropy, min_confidence.into()))
-        }
+        Command::Extract { paths, output } => ignore_broken_pipe(extract(&paths, &output)),
+        Command::Scan { target } => ignore_broken_pipe(scan::run(target)),
     }
 }
 
@@ -148,8 +170,9 @@ struct ExtractOutput<'a> {
     digest: Option<String>,
 }
 
-fn extract(paths: &[PathBuf], show_digests: bool, entropy: bool, min_confidence: Confidence) -> anyhow::Result<()> {
-    let extractor = Extractor::new(Config { entropy, ..Config::default() });
+fn extract(paths: &[PathBuf], output: &OutputArgs) -> anyhow::Result<()> {
+    let extractor = output.extractor();
+    let min_confidence = Confidence::from(output.min_confidence);
     let mut stdout = std::io::stdout().lock();
     let mut failed = 0usize;
     for path in paths {
@@ -176,7 +199,7 @@ fn extract(paths: &[PathBuf], show_digests: bool, entropy: bool, min_confidence:
             let out = ExtractOutput {
                 path: label.clone(),
                 candidate,
-                digest: show_digests.then(|| candidate.digest.to_hex()),
+                digest: output.show_digests.then(|| candidate.digest.to_hex()),
             };
             serde_json::to_writer(&mut stdout, &out)?;
             writeln!(stdout)?;
@@ -194,7 +217,7 @@ fn read_limited(path: &std::path::Path) -> anyhow::Result<Zeroizing<Vec<u8>>> {
         std::io::stdin().take(MAX_FILE_BYTES).read_to_end(&mut buf).context("cannot read stdin")?;
     } else {
         if path.is_dir() {
-            bail!("is a directory (recursive scanning arrives with `scan`)");
+            bail!("is a directory; use `secrettrace scan fs`");
         }
         let file = std::fs::File::open(path).context("cannot open")?;
         // Pre-size the buffer: growing a Vec frees old copies without zeroizing them.

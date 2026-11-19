@@ -1,6 +1,6 @@
 [package]
 name = "st-cli"
-description = "SecretTrace command-line client (local digests and extraction; registration and CI scanning next)"
+description = "SecretTrace command-line client: local digests, extraction and filesystem/git scanning"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 st-core.workspace = true
 st-extract.workspace = true
+st-source.workspace = true
 
 anyhow.workspace = true
 clap.workspace = true
@@ -23,6 +24,7 @@ zeroize.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

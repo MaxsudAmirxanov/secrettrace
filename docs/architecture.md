@@ -44,8 +44,9 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 |---|---|
 | `st-core` | нормализация, digest, hints, маскирование; без сети и без pepper |
 | `st-extract` | извлечение кандидатов из текста, локальный digest; общий для CLI, агентов и воркера |
+| `st-source` | источники: файловая система и git-история → документы для экстрактора; пул потоков |
 | `st-server` | API, воркер, админ-команды (`migrate`, `verify-audit`, `gen-pepper`) |
-| `st-cli` | `secrettrace`: `digest`, `extract` сейчас; `register`, `scan git/fs` для CI позже |
+| `st-cli` | `secrettrace`: `digest`, `extract`, `scan fs|git` (локально); `register` и отправка на сервер позже |
 
 Очередь в MVP — сам Postgres (`FOR UPDATE SKIP LOCKED` + outbox). NATS JetStream появится на этапе 2 для
 потоковых коллекторов. События использования будут лежать в партиционированной таблице (TimescaleDB при росте).
@@ -117,16 +118,47 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   сценарии: поиск `END` для каждого `BEGIN` и сканирование хвоста значения ограничены окном.
 - **Вывод CLI** не содержит digest без явного флага: digest слабого пароля перебирается офлайн.
 
-## 7. Ошибки API
+## 7. Источники
+
+Источник отдаёт `Document { locator, text: Zeroizing<String>, encoding, truncated }` в callback, `st_source::scan`
+раздаёт документы пулу потоков через ограниченный канал (обход не убегает вперёд извлечения) и собирает
+`DocumentFindings` в порядке источника. Результат не зависит от числа потоков. Пропуски считаются в `Stats`,
+а не теряются; ошибки чтения хранят путь и ошибку ОС, без содержимого.
+
+- **Файловая система.** `walkdir` без следования по ссылкам и `open(O_NOFOLLOW | O_NONBLOCK)` с `fstat`
+  после открытия: симлинк, подменённый после обхода, или FIFO не будут прочитаны. Корень канонизируется,
+  поэтому явно заданный симлинк-корень работает. Исключения — glob'ы в духе gitignore; `.git`, `.hg`
+  и `.svn` исключены по умолчанию, историю сканирует git-источник.
+- **Git: скан.** `rev-list --objects <revs>` → `cat-file --batch-check` (тип, размер, путь) →
+  `cat-file --batch` по одному blob'у с синхронным запросом-ответом, поэтому взаимной блокировки на пайпах
+  нет. Каждый уникальный blob читается один раз. `--missing=print` и `GIT_NO_LAZY_FETCH` дают shallow
+  и partial clone без сетевых запросов; отсутствующие объекты считаются.
+- **Git: где лежит.** `locate(blobs)` — один `git log --raw -z --find-object=…` на пачку из 500 blob'ов,
+  `--topo-order --reverse`: родители раньше потомков даже при одинаковом времени коммитов.
+  `head_blobs()` (`ls-tree -r HEAD`) отвечает на вопрос, есть ли blob в текущем состоянии, это поле
+  `locations.in_current_state`.
+- **Инкрементальность.** Ревизии `main ^<последний просканированный коммит>` дают только новые blob'ы:
+  то, что достижимо из старого коммита, `rev-list` не выдаёт. Воркер этапа 9 будет хранить этот коммит
+  в `sources.config`.
+- **Изоляция git.** Удаляются унаследованные `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+  `GIT_OBJECT_DIRECTORY` и т.п.; `GIT_NO_REPLACE_OBJECTS=1` (иначе `refs/replace/*` скрыли бы настоящее
+  содержимое); `GIT_TERMINAL_PROMPT=0`; `log.showSignature=false` (без gpg); `core.fsmonitor=false`.
+  Ревизии валидируются и идут после `--end-of-options`. Бинарный образ сервера сейчас distroless и без
+  git; для серверного клонирования (этап 9) воркеру понадобится образ с git.
+- **Память.** Буферы файлов и blob'ов выделяются один раз точного размера (рост `Vec` оставил бы
+  незатёртую копию), декодирование в текст переносит буфер без копирования, буфер чтения из `cat-file`
+  затирается. Сам процесс git и ядро (pipe) держат копии, которые мы контролировать не можем.
+
+## 8. Ошибки API
 
 `application/problem+json`, поле `type` — стабильный URN: `urn:secrettrace:problem:{bad-request|unauthorized|
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
-## 8. Схема БД
+## 9. Схема БД
 См. `migrations/0001_core.sql` и `0002_auth.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
 `scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
 
-## 9. План MVP
+## 10. План MVP
 
 | # | Задача | Статус |
 |---|---|---|
@@ -137,7 +169,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 4 | Auth: argon2id, сессии, обязательный TOTP, CSRF, lockout, API-токены, RBAC, `create-user` | ✅ |
 | 5 | API реестра секретов + allow-rules + аудит, OpenAPI (utoipa) | ✅ |
 | 6 | Извлечение кандидатов: known formats, kv, URL userinfo, PEM, high-entropy; декодеры base64/url/json | ✅ |
-| 7 | Источники-плагины: filesystem, git (уникальные blob'ы + `--find-object`) | |
+| 7 | Источники-плагины: filesystem, git (уникальные blob'ы + `--find-object`) | ✅ |
 | 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | |
 | 9 | Воркер: очередь, планировщик, клонирование по `credential_ref` | |
 | 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |

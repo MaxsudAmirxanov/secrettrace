@@ -21,6 +21,7 @@ secrets: ## Generate local secret files (never overwrites existing ones)
 	  "$$(cat $(SECRETS_DIR)/app_db_password)" > $(SECRETS_DIR)/app_database_url
 	@[ -s $(SECRETS_DIR)/pepper_keys ] || printf '1:%s\n' "$$(openssl rand -base64 32)" > $(SECRETS_DIR)/pepper_keys
 	@[ -s $(SECRETS_DIR)/data_key ] || openssl rand -base64 32 > $(SECRETS_DIR)/data_key
+	@[ -s $(SECRETS_DIR)/canary_key ] || openssl rand -base64 32 > $(SECRETS_DIR)/canary_key
 	@# Files are bind-mounted into containers running as other UIDs; the 0700 directory keeps them private on the host.
 	@chmod 644 $(SECRETS_DIR)/*
 	@# Worker: credential files by name (credential_ref) and ssh host keys. deploy/worker stays

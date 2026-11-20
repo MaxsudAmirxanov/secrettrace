@@ -8,7 +8,7 @@ use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, Uri, header};
 use axum::response::{IntoResponse as _, Response};
-use axum::routing::{delete, get, patch, post};
+use axum::routing::{any, delete, get, patch, post};
 use sqlx::PgPool;
 use tower::ServiceBuilder;
 use tower_http::catch_panic::CatchPanicLayer;
@@ -20,6 +20,7 @@ use tracing::Level;
 
 use crate::auth::AuthSettings;
 use crate::auth::ratelimit::AuthLimiters;
+use crate::canary::CanarySettings;
 use crate::crypto::{DataKey, Pepper};
 use crate::error::{ApiError, Problem, problem_response};
 use crate::ingest::IngestLimiter;
@@ -41,6 +42,8 @@ pub struct AppState {
     pub limiters: Arc<AuthLimiters>,
     /// Per-token limits of `/ingest/…/match`.
     pub ingest: Arc<IngestLimiter>,
+    /// Canary tokens; `None` when not configured.
+    pub canary: Option<Arc<CanarySettings>>,
 }
 
 impl AppState {
@@ -53,7 +56,15 @@ impl AppState {
             auth: Arc::new(auth),
             limiters: Arc::new(AuthLimiters::default()),
             ingest: Arc::new(IngestLimiter::default()),
+            canary: None,
         }
+    }
+
+    /// Enable canary tokens.
+    #[must_use]
+    pub fn with_canaries(mut self, settings: Option<CanarySettings>) -> Self {
+        self.canary = settings.map(Arc::new);
+        self
     }
 
     /// Replace the default ingest limits (configuration, tests).
@@ -97,6 +108,8 @@ pub fn router_with_web(state: AppState, limits: HttpLimits, web: Option<Arc<WebA
         .route("/secrets", get(routes::secrets::list).post(routes::secrets::create))
         .route("/secrets/{id}", get(routes::secrets::get).patch(routes::secrets::update))
         .route("/secrets/{id}/locations", get(routes::secrets::locations))
+        .route("/canaries", get(routes::canaries::list).post(routes::canaries::create))
+        .route("/canaries/{id}", get(routes::canaries::get).patch(routes::canaries::update))
         .route("/sources", get(routes::sources::list).post(routes::sources::create))
         .route(
             "/sources/{id}",
@@ -120,6 +133,8 @@ pub fn router_with_web(state: AppState, limits: HttpLimits, web: Option<Arc<WebA
     Router::new()
         .route("/healthz", get(routes::health::healthz))
         .route("/readyz", get(routes::health::readyz))
+        // Requests the edge's canary listener received (outside /api: not an API).
+        .route("/_canary", any(routes::canaries::hit))
         .nest("/api/v1", api_v1)
         .fallback(move |method: Method, uri: Uri| {
             let web = web.clone();

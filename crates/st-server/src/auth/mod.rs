@@ -19,7 +19,7 @@ pub mod totp;
 use std::net::IpAddr;
 use std::time::Duration;
 
-pub use extract::{CLIENT_CN_HEADER, CurrentUser, RequestMeta, SessionAuth, TokenPrincipal};
+pub use extract::{CLIENT_CN_HEADER, CurrentUser, FromTrustedProxy, RequestMeta, SessionAuth, TokenPrincipal};
 pub use role::Role;
 
 /// Failed password/TOTP attempts before the account is locked.

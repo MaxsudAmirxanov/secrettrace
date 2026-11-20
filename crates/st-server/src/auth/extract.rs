@@ -26,6 +26,18 @@ fn peer_ip(parts: &Parts) -> Option<IpAddr> {
         .or_else(|| parts.extensions.get::<MockConnectInfo<SocketAddr>>().map(|c| c.0.ip()))
 }
 
+/// Whether the TCP peer is one of `ST_TRUSTED_PROXIES` (the edge).
+#[derive(Debug, Clone, Copy)]
+pub struct FromTrustedProxy(pub bool);
+
+impl FromRequestParts<AppState> for FromTrustedProxy {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
+        Ok(Self(peer_ip(parts).is_some_and(|p| state.auth.trusted_proxies.contains(&p))))
+    }
+}
+
 /// Header the mTLS proxy sets to the CN of the client certificate it verified. Only read
 /// from `trusted_proxies`; the proxy's other listeners clear it.
 pub const CLIENT_CN_HEADER: &str = "x-secrettrace-client-cn";

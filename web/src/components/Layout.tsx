@@ -8,6 +8,7 @@ import { useTheme } from "../lib/theme";
 import {
   IconAlert,
   IconAudit,
+  IconBell,
   IconDashboard,
   IconKey,
   IconLogout,
@@ -37,6 +38,7 @@ const MAIN: NavEntry[] = [
   { to: "/secrets", label: "Реестр секретов", icon: <IconKey />, role: "viewer" },
   { to: "/sources", label: "Источники", icon: <IconRepo />, role: "viewer" },
   { to: "/scans", label: "Сканы", icon: <IconScan />, role: "viewer" },
+  { to: "/canaries", label: "Ловушки", icon: <IconBell />, role: "viewer" },
 ];
 
 const ADMIN: NavEntry[] = [

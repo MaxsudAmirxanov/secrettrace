@@ -11,6 +11,11 @@ import { del, get, patch, post } from "./client";
 import type {
   AuditEntry,
   AuditVerify,
+  Canary,
+  CanaryCreate,
+  CanaryDetail,
+  CanaryUpdate,
+  CreatedCanary,
   CreatedToken,
   Finding,
   Location,
@@ -73,6 +78,15 @@ export const useScan = (id: string) =>
     queryKey: ["scan", id],
     queryFn: ({ signal }) => get<Scan>(`/scans/${id}`, undefined, signal),
     refetchInterval: (q) => (q.state.data && ["queued", "running"].includes(q.state.data.status) ? 2_000 : false),
+  });
+
+export const useCanaries = () =>
+  useQuery({ queryKey: ["canaries"], queryFn: ({ signal }) => get<Canary[]>("/canaries", undefined, signal), refetchInterval: 30_000 });
+export const useCanary = (id: string) =>
+  useQuery({
+    queryKey: ["canary", id],
+    queryFn: ({ signal }) => get<CanaryDetail>(`/canaries/${id}`, undefined, signal),
+    refetchInterval: 15_000,
   });
 
 export const useTokens = () =>
@@ -142,6 +156,23 @@ export function useCancelScan() {
   return useMutation({
     mutationFn: (id: string) => post<Scan>(`/scans/${id}/cancel`),
     onSuccess: () => inv("scans", "scan", "sources", "source", "overview"),
+  });
+}
+
+export function useCreateCanary() {
+  const inv = useInvalidate();
+  return useMutation({
+    mutationFn: (body: CanaryCreate) => post<CreatedCanary>("/canaries", body),
+    // api_key canaries are also registered secrets.
+    onSuccess: () => inv("canaries", "secrets", "overview"),
+  });
+}
+
+export function useUpdateCanary(id: string) {
+  const inv = useInvalidate();
+  return useMutation({
+    mutationFn: (body: CanaryUpdate) => patch<Canary>(`/canaries/${id}`, body),
+    onSuccess: () => inv("canaries", "canary"),
   });
 }
 

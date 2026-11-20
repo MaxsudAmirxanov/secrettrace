@@ -57,6 +57,10 @@ use crate::routes;
         routes::scans::list,
         routes::scans::get,
         routes::scans::cancel,
+        routes::canaries::list,
+        routes::canaries::create,
+        routes::canaries::get,
+        routes::canaries::update,
     ),
     modifiers(&SecuritySchemes),
     tags(
@@ -66,6 +70,7 @@ use crate::routes;
         (name = "ingest", description = "Scan results from agents and CI (API tokens): match digests, report locations"),
         (name = "sources", description = "Sources to scan: git repositories with schedule and credential reference"),
         (name = "scans", description = "Scan jobs: server-side (manual, scheduled) and reported by API tokens"),
+        (name = "canaries", description = "Canary tokens: bait whose use or discovery is a leak"),
         (name = "overview", description = "Dashboard numbers and the list of all findings"),
         (name = "users", description = "User administration (admin)"),
         (name = "audit", description = "Audit log and hash-chain verification (admin)"),

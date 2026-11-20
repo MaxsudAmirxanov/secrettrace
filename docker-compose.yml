@@ -70,7 +70,11 @@ services:
       # client certificate (cert_cn) and come through the mTLS port.
       ST_TRUSTED_PROXIES: ${ST_EDGE_PROXY_IP:-10.213.0.10}
       ST_INGEST_REQUIRE_CLIENT_CERT: "true"
-    secrets: [app_database_url, pepper_keys, data_key]
+      # Canary tokens: the public URL of the edge's canary listener (what a canary link
+      # points at) and the key their lookup HMAC uses.
+      ST_CANARY_BASE_URL: ${ST_CANARY_BASE_URL:-http://localhost:8081}
+      ST_CANARY_KEY_FILE: /run/secrets/canary_key
+    secrets: [app_database_url, pepper_keys, data_key, canary_key]
     depends_on:
       migrate: { condition: service_completed_successfully }
     networks: [db, edge]
@@ -96,6 +100,8 @@ services:
     ports:
       - "${ST_EDGE_BIND:-127.0.0.1}:${ST_EDGE_HTTPS_PORT:-443}:8443"
       - "${ST_EDGE_BIND:-127.0.0.1}:${ST_EDGE_MTLS_PORT:-8443}:9443"
+      # The canary listener is the one port meant for the internet: ST_CANARY_BIND=0.0.0.0.
+      - "${ST_CANARY_BIND:-127.0.0.1}:${ST_CANARY_PORT:-8081}:9080"
     depends_on: [server]
     networks:
       edge:
@@ -146,6 +152,7 @@ secrets:
   app_database_url:   { file: "${ST_SECRETS_DIR:-./deploy/secrets}/app_database_url" }
   pepper_keys:        { file: "${ST_SECRETS_DIR:-./deploy/secrets}/pepper_keys" }
   data_key:           { file: "${ST_SECRETS_DIR:-./deploy/secrets}/data_key" }
+  canary_key:         { file: "${ST_SECRETS_DIR:-./deploy/secrets}/canary_key" }
 
 volumes:
   pgdata:

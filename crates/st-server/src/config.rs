@@ -41,6 +41,8 @@ pub struct Config {
     pub ingest_digests_per_hour: u32,
     /// Built web UI (`web/dist`) served on non-API paths; `None` serves the API only.
     pub web_dir: Option<std::path::PathBuf>,
+    /// Canary tokens (`ST_CANARY_KEY` + `ST_CANARY_BASE_URL`); `None` disables them.
+    pub canary: Option<crate::canary::CanarySettings>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +108,7 @@ impl Config {
                 n => n,
             },
             web_dir: env.get("ST_WEB_DIR").filter(|d| !d.trim().is_empty()).map(std::path::PathBuf::from),
+            canary: canary_settings(&env)?,
         };
         if config.auth.require_client_cert && config.auth.trusted_proxies.is_empty() {
             // The certificate CN comes from the mTLS proxy; without a trusted proxy no
@@ -306,6 +309,33 @@ impl Env<'_> {
     }
 }
 
+/// Both or neither of `ST_CANARY_KEY` and `ST_CANARY_BASE_URL`.
+fn canary_settings(env: &Env<'_>) -> Result<Option<crate::canary::CanarySettings>, ConfigError> {
+    let key = env.secret("ST_CANARY_KEY")?;
+    let base = env.get("ST_CANARY_BASE_URL").filter(|v| !v.trim().is_empty());
+    match (key, base) {
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(ConfigError::Invalid {
+            var: "ST_CANARY_BASE_URL",
+            reason: "required with ST_CANARY_KEY: the public URL of the canary listener".into(),
+        }),
+        (None, Some(_)) => Err(ConfigError::Missing("ST_CANARY_KEY")),
+        (Some(key), Some(base)) => {
+            let base = base.trim();
+            let scheme_ok = base.starts_with("https://") || base.starts_with("http://");
+            if !scheme_ok || base.contains(['?', '#', '@']) || base.chars().any(char::is_whitespace) {
+                return Err(ConfigError::Invalid {
+                    var: "ST_CANARY_BASE_URL",
+                    reason: "must be an http(s) URL without credentials, query or fragment".into(),
+                });
+            }
+            crate::canary::CanarySettings::new(&key, base)
+                .map(Some)
+                .map_err(|e| ConfigError::Invalid { var: "ST_CANARY_KEY", reason: e.to_string() })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -331,6 +361,22 @@ mod tests {
             ("ST_PEPPER_KEYS", "1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="),
             ("ST_DATA_KEY", DATA_KEY),
         ]
+    }
+
+    #[test]
+    fn canary_settings_need_both_variables() {
+        assert!(load(&base()).unwrap().canary.is_none());
+        let mut v = base();
+        v.push(("ST_CANARY_KEY", DATA_KEY));
+        assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_CANARY_BASE_URL", .. }));
+        v.push(("ST_CANARY_BASE_URL", "https://assets.example.com/"));
+        assert_eq!(load(&v).unwrap().canary.unwrap().base_url, "https://assets.example.com");
+        let mut v = base();
+        v.extend([("ST_CANARY_KEY", "short"), ("ST_CANARY_BASE_URL", "https://a.example")]);
+        assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_CANARY_KEY", .. }));
+        let mut v = base();
+        v.extend([("ST_CANARY_KEY", DATA_KEY), ("ST_CANARY_BASE_URL", "ftp://a.example?x")]);
+        assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_CANARY_BASE_URL", .. }));
     }
 
     #[test]

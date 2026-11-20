@@ -1,4 +1,4 @@
-import type { JobStatus, Role, ScanTrigger, SecretStatus, SecretType, SourceType, TokenKind } from "../api/types";
+import type { CanaryHit, CanaryKind, JobStatus, Role, ScanTrigger, SecretStatus, SecretType, SourceType, TokenKind } from "../api/types";
 
 export const SECRET_TYPE_LABELS: Record<SecretType, string> = {
   api_key: "API-ключ",
@@ -53,6 +53,24 @@ export const ROLE_HINTS: Record<Role, string> = {
   viewer: "Только просмотр реестра, находок и сканов",
   operator: "Управление секретами, источниками и сканами",
   admin: "Всё, плюс пользователи, API-токены и аудит",
+};
+
+export const CANARY_KIND_LABELS: Record<CanaryKind, string> = {
+  url: "Ссылка",
+  api_key: "API-ключ",
+};
+
+export const CANARY_KIND_HINTS: Record<CanaryKind, string> = {
+  url: "Уникальная ссылка: срабатывает, когда её кто-то откроет. Для вики, документов, закладок, писем.",
+  api_key: "Фальшивый ключ с адресом сервиса для .env и конфигов: срабатывает при попытке им воспользоваться.",
+};
+
+export const CANARY_VIA_LABELS: Record<CanaryHit["via"], string> = {
+  path: "путь",
+  query: "параметр URL",
+  bearer: "Bearer",
+  basic: "Basic",
+  header: "заголовок",
 };
 
 export const TOKEN_KIND_LABELS: Record<TokenKind, string> = {

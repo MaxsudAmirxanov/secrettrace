@@ -1,6 +1,7 @@
 pub mod api_tokens;
 pub mod audit;
 pub mod auth;
+pub mod canaries;
 pub mod health;
 pub mod ingest;
 pub mod overview;

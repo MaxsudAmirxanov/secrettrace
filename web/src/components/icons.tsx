@@ -82,6 +82,7 @@ export const IconSun = make(
   "IconSun",
 );
 export const IconMoon = make(["M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"], "IconMoon");
+export const IconBell = make(["M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9", "M10.3 21a1.94 1.94 0 0 0 3.4 0"], "IconBell");
 export const IconShield = make(["M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"], "IconShield");
 export const IconLock = make(["M5 11h14v10H5z", "M8 11V7a4 4 0 0 1 8 0v4"], "IconLock");
 export const IconEye = make(["M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"], "IconEye");

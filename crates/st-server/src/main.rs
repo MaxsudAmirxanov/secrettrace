@@ -95,7 +95,12 @@ async fn serve(config: Config) -> anyhow::Result<()> {
         tracing::warn!("ST_COOKIE_SECURE=false: session cookies are sent over plain HTTP (development only)");
     }
     let ingest = app::IngestLimits { digests_per_hour: config.ingest_digests_per_hour, ..app::IngestLimits::default() };
-    let state = AppState::new(pool, config.pepper, config.data_key, config.auth).with_ingest_limits(ingest);
+    if config.canary.is_none() {
+        tracing::info!("canary tokens disabled (set ST_CANARY_KEY and ST_CANARY_BASE_URL to enable)");
+    }
+    let state = AppState::new(pool, config.pepper, config.data_key, config.auth)
+        .with_ingest_limits(ingest)
+        .with_canaries(config.canary);
     let limits = HttpLimits { request_timeout: config.request_timeout, max_body_bytes: config.max_body_bytes };
     let web = match &config.web_dir {
         Some(dir) => {

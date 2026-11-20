@@ -4,6 +4,8 @@ import { RequireAuth, RequireRole } from "./auth/guards";
 import { Layout } from "./components/Layout";
 import { AccountPage } from "./pages/Account";
 import { AuditPage } from "./pages/Audit";
+import { CanariesPage } from "./pages/Canaries";
+import { CanaryDetailPage } from "./pages/CanaryDetail";
 import { DashboardPage } from "./pages/Dashboard";
 import { FindingsPage } from "./pages/Findings";
 import { LoginPage } from "./pages/Login";
@@ -54,6 +56,8 @@ export function App() {
         <Route path="sources/:id" element={<SourceDetailPage />} />
         <Route path="scans" element={<ScansPage />} />
         <Route path="scans/:id" element={<ScanDetailPage />} />
+        <Route path="canaries" element={<CanariesPage />} />
+        <Route path="canaries/:id" element={<CanaryDetailPage />} />
         <Route
           path="tokens"
           element={

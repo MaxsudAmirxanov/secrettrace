@@ -266,3 +266,57 @@ export interface Overview {
   recent_violations: Finding[];
   recent_scans: Scan[];
 }
+
+export type CanaryKind = "url" | "api_key";
+
+export interface Canary {
+  id: string;
+  name: string;
+  kind: CanaryKind;
+  planted_at: string | null;
+  memo: string | null;
+  /** Registered secret of an api_key canary: scans report it wherever it appears. */
+  secret_id: string | null;
+  enabled: boolean;
+  hit_count: number;
+  last_hit_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CanaryHit {
+  id: number;
+  at: string;
+  ip: string | null;
+  method: string;
+  host: string | null;
+  /** Request target with the token replaced by `{token}`. */
+  path: string;
+  user_agent: string | null;
+  via: "path" | "query" | "bearer" | "basic" | "header";
+}
+
+export interface CanaryDetail extends Canary {
+  hits: CanaryHit[];
+}
+
+export interface CanaryCreate {
+  name: string;
+  kind: CanaryKind;
+  planted_at?: string;
+  memo?: string;
+}
+
+/** Returned once: the server keeps only an HMAC of the token. */
+export interface CreatedCanary {
+  canary: Canary;
+  value: string;
+  endpoint: string | null;
+  snippet: string;
+}
+
+export interface CanaryUpdate {
+  enabled?: boolean;
+  planted_at?: string | null;
+  memo?: string | null;
+}

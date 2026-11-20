@@ -146,6 +146,16 @@ def cmd_worker_scan(name, uri):
     fail(f"worker scan did not finish in time: {scan}")
 
 
+def cmd_canary(name, kind):
+    _, _, data = call("POST", "/canaries", {"name": name, "kind": kind, "planted_at": "e2e"}, expect=201)
+    print(json.dumps(data))
+
+
+def cmd_canary_get(canary_id):
+    _, _, data = call("GET", f"/canaries/{canary_id}", expect=200)
+    print(json.dumps(data))
+
+
 def cmd_audit():
     _, _, verify = call("GET", "/audit/verify", expect=200)
     actions, cursor = [], None
@@ -159,7 +169,8 @@ def cmd_audit():
 
 
 COMMANDS = {"login": cmd_login, "token": cmd_token, "secret": cmd_secret, "allow": cmd_allow,
-            "locations": cmd_locations, "worker-scan": cmd_worker_scan, "audit": cmd_audit}
+            "locations": cmd_locations, "worker-scan": cmd_worker_scan, "canary": cmd_canary,
+            "canary-get": cmd_canary_get, "audit": cmd_audit}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2 or sys.argv[1] not in COMMANDS:

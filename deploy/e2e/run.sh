@@ -19,6 +19,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PROJECT="${E2E_PROJECT:-secrettrace-e2e}"
 HTTPS_PORT="${E2E_HTTPS_PORT:-28443}"
 MTLS_PORT="${E2E_MTLS_PORT:-28444}"
+CANARY_PORT="${E2E_CANARY_PORT:-28445}"
 TAG="${E2E_TAG:-e2e}"
 CLI_IMAGE="secrettrace-cli:$TAG"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/secrettrace-e2e.XXXXXX")"
@@ -26,6 +27,7 @@ chmod 700 "$WORK"
 STARTED=$(date +%s)
 
 export ST_IMAGE_TAG="$TAG" ST_EDGE_HTTPS_PORT="$HTTPS_PORT" ST_EDGE_MTLS_PORT="$MTLS_PORT"
+export ST_CANARY_PORT="$CANARY_PORT" ST_CANARY_BASE_URL="http://localhost:$CANARY_PORT"
 export ST_EDGE_SUBNET="${E2E_SUBNET:-10.214.0.0/24}" ST_EDGE_PROXY_IP="${E2E_PROXY_IP:-10.214.0.10}"
 export ST_SECRETS_DIR="$WORK/secrets" ST_PKI_DIR="$WORK/pki" ST_WORKER_DIR="$WORK/worker"
 export ST_WORKER_ALLOW_LOCAL_REPOS=true ST_WORKER_ALLOWED_HOSTS=git.example.com E2E_REPOS="$WORK/repos"
@@ -211,13 +213,41 @@ worker_locs="$(api locations "$SECRET_ID" | jq -c '[.[] | select(.uri == "file:/
   || fail "worker locations: $worker_locs"
 pass "worker cloned, scanned and recorded both locations"
 
+step "canary tokens through the canary listener"
+url_c="$(api canary e2e-link url)"
+url="$(jq -r .value <<<"$url_c")"; url_id="$(jq -r .canary.id <<<"$url_c")"
+[[ "$url" == "http://localhost:$CANARY_PORT/"* ]] || fail "canary link: $url"
+key_c="$(api canary e2e-env api_key)"
+key="$(jq -r .value <<<"$key_c")"; key_id="$(jq -r .canary.id <<<"$key_c")"
+endpoint="$(jq -r .endpoint <<<"$key_c")"
+[[ "$key" =~ ^ak_[a-z2-7]{40}$ ]] || fail "canary key: $key"
+[[ "$(jq -r .canary.secret_id <<<"$key_c")" =~ ^[0-9a-f-]{36}$ ]] || fail "api_key canary not registered as a secret"
+miss="$(curl -s -w ' %{http_code}' "http://localhost:$CANARY_PORT/static/nothing.png")"
+hit="$(curl -s -w ' %{http_code}' -A 'e2e-bot/1.0' "$url.png?ref=wiki")"
+[[ "$hit" == "$miss" && "$hit" == *" 404" ]] || fail "hit and miss must look the same: '$hit' vs '$miss'"
+curl -s -o /dev/null -H "Authorization: Bearer $key" "$endpoint/charges"
+# The other listeners clear the canary headers: a forged hit through :443 records nothing.
+curl -s -o /dev/null --cacert "$E2E_CA" -H 'X-SecretTrace-Canary: 1' \
+  -H "X-SecretTrace-Original-URI: ${url#http://localhost:$CANARY_PORT}" "$E2E_BASE/_canary"
+url_d="$(api canary-get "$url_id")"; key_d="$(api canary-get "$key_id")"
+[[ "$(jq -c '[.hit_count, (.hits | length), .hits[0].via, .hits[0].user_agent]' <<<"$url_d")" == '[1,1,"path","e2e-bot/1.0"]' ]] \
+  || fail "url canary hits: $url_d"
+jq -e '.hits[0].path | test("\\{token\\}\\.png\\?ref=wiki$")' <<<"$url_d" >/dev/null || fail "stored path: $url_d"
+[[ "$(jq -c '[.hit_count, .hits[0].via, .hits[0].path]' <<<"$key_d")" == '[1,"bearer","/v1/charges"]' ]] || fail "key canary hits: $key_d"
+grep -q "$key" <<<"$url_d$key_d" && fail "a canary value appeared in the API"
+pass "link and fake key fired (path / bearer), identical 404 for hit and miss, forged hit via :443 ignored"
+compose logs --no-color edge 2>/dev/null | grep -q "${key:3:20}" && fail "the canary key reached the edge log"
+compose logs --no-color edge 2>/dev/null | grep -q "${url##*/}" && fail "the canary token reached the edge log"
+pass "no token in the edge access log"
+
 step "audit chain"
 compose run --rm --no-deps -T server verify-audit >"$WORK/verify.out" 2>&1 || { cat "$WORK/verify.out"; fail "verify-audit failed"; }
 pass "secrettrace-server verify-audit"
 audit="$(api audit)"
 [[ "$(jq -r .verify.ok <<<"$audit")" == true ]] || fail "audit/verify: $audit"
 for action in db.migrate user.create auth.login.success api_token.create secret.create secret.update \
-              ingest.scan_start ingest.match ingest.findings ingest.scan_complete source.create scan.enqueue scan.finish; do
+              ingest.scan_start ingest.match ingest.findings ingest.scan_complete source.create scan.enqueue scan.finish \
+              canary.create; do
   jq -e --arg a "$action" '.actions | index($a)' <<<"$audit" >/dev/null || fail "audit has no $action: $audit"
 done
 pass "$(jq -r .verify.rows <<<"$audit") rows verified; expected actions present"

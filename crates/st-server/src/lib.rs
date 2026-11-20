@@ -4,6 +4,7 @@
 pub mod app;
 pub mod audit;
 pub mod auth;
+pub mod canary;
 pub mod config;
 pub mod crypto;
 pub mod db;

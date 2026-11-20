@@ -33,6 +33,7 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
             ┌──────────── nginx (edge) ────────────┐
  браузер ──▶│ :443  TLS → web (static) + /api      │  ingest на :443 — 403
  агент/CI ─▶│ :8443 mTLS → /api/v1/ingest          │  CN → X-SecretTrace-Client-CN
+ интернет ─▶│ :8081 canary → /_canary (только)     │  исходный путь → заголовок
             └───────────────┬──────────────────────┘
                             ▼
       secrettrace-server serve  ◀── Postgres 17 ──▶  secrettrace-server worker
@@ -235,6 +236,35 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 - **Ограничения:** ключ CA лежит рядом с установкой (для продакшена — внешний CA); OCSP нет; отзыв
   сертификата действует после reload edge; привязку CN нельзя изменить у выпущенного токена — выпускается новый.
 
+## 8b. Canary-токены
+
+Приманка, которой никто не пользуется законно: любое её использование или обнаружение — утечка, какой бы путь
+она ни прошла (файл, сеть, скриншот, вставка в чат).
+
+- **Виды.** `url` — ссылка `<ST_CANARY_BASE_URL>/<слово>/<токен>`, токен — 26 символов base32 (130 бит,
+  годится и как DNS-метка для будущего DNS-канарейки). `api_key` — `ak_` + 40 символов base32 (200 бит)
+  вместе с адресом «сервиса» `<base>/v1`, выдаётся строками для `.env`. Ключ `api_key` дополнительно
+  регистрируется как секрет (`canary: <имя>`, владелец `canary`, без allow-правил): скан, нашедший его
+  где угодно, сообщает нарушение обычным путём.
+- **Хранение.** Значение показывается один раз. В БД — только `HMAC-SHA256(ST_CANARY_KEY, "secrettrace/canary/v1\0"
+  || токен)`: дамп без ключа не скажет, какие из найденных ключей — приманки (у `api_key` в реестре лежит
+  обычный отпечаток с pepper, как у любого секрета).
+- **Срабатывание.** Отдельный listener edge (`:9080`, наружу `ST_CANARY_PORT`) любой запрос переписывает
+  в `/_canary` на сервере и передаёт исходный target в `X-SecretTrace-Original-URI` с `X-SecretTrace-Canary: 1`;
+  остальные listener'ы эти заголовки очищают, а сервер верит им только от `ST_TRUSTED_PROXIES`. Кандидаты
+  ищутся в сегментах пути (без расширения), значениях query, `Authorization` (Bearer/Token/Basic), `X-Api-Key`,
+  `Api-Key`, `X-Auth-Token`, `Apikey`; HMAC считается только для токенов правильной формы, не больше 16 на запрос.
+- **Ответ** всегда один: `404 Not Found`, `no-store` — попавший не узнает, что сработала ловушка.
+  Превышение `limit_req` (10 запросов/с с адреса) тоже 404.
+- **Что пишется.** Счётчик и `last_hit_at` — всегда; строка `canary_hits` (IP, метод, host, путь с `{token}`
+  вместо токена, User-Agent, где найден) — не больше 10 в минуту и 10 000 всего на приманку; алерт
+  `canary.triggered` (critical, `dedup_key = canary:<id>`, повторы увеличивают `occurrences`); `warn` в лог.
+  Выключенная приманка запросы игнорирует. Лог edge пишет `$uri` (`/_canary`), а не исходный путь с токеном.
+- **Ограничения.** Доставки алертов пока нет (этап 10): срабатывание видно в UI, в таблице `alerts` и в логе
+  сервера. Listener — обычный HTTP: для HTTPS снаружи нужен публично доверенный сертификат (свой CA у атакующего
+  не пройдёт проверку, и запрос не дойдёт). Ссылку не «откроет» почтовый сканер без перехода — это свойство всех
+  URL-канареек; DNS-канарейка (срабатывает уже на резолве) — следующий шаг.
+
 ## 9. Воркер
 
 `secrettrace-server worker` — отдельный процесс (и образ с git): очередь, планировщик, жнец, клонирование.
@@ -337,8 +367,8 @@ SPA в `web/`, собирается в статические файлы; сер
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
 ## 12. Схема БД
-См. `migrations/0001_core.sql`, `0002_auth.sql`, `0003_ingest.sql`, `0004_worker.sql` и `0005_edge.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
-`scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
+См. `migrations/0001_core.sql` … `0006_canaries.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
+`scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`, `canaries`, `canary_hits`.
 
 ## 13. План MVP
 
@@ -358,7 +388,8 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | ✅ |
 | 12 | Web UI (React + TS): логин и MFA, обзор, находки, секреты, источники, сканы, токены, пользователи, аудит | ✅ |
 | 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | ✅ |
-| 14 | E2E в compose, threat model ([threat-model.md](threat-model.md)) | threat model ✅, E2E — |
+| 14 | E2E в compose, threat model ([threat-model.md](threat-model.md)) | ✅ |
+| 15 | Canary-токены: `url` и `api_key`, listener на edge, срабатывания, алерты в таблице (§ 8b) | ✅ |
 
-Этапы после MVP: коллекторы (Vault audit, CloudTrail, auth.log, SDK) и граф (Cytoscape.js); canary-токены
-с trigger-сервером; политики и аномалии; ротация через Vault и AWS IAM.
+Этапы после MVP: коллекторы (Vault audit, CloudTrail, auth.log, SDK) и граф (Cytoscape.js); DNS- и AWS-канарейки;
+политики и аномалии; ротация через Vault и AWS IAM.

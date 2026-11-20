@@ -1,625 +1,250 @@
 # SecretTrace
 
-Отслеживание жизненного цикла секретов в собственной инфраструктуре: где лежит каждый зарегистрированный
-секрет, кто им пользуется и не утёк ли он туда, где его быть не должно. Хранятся только HMAC-отпечатки,
-не значения.
+**Know whose secret leaked.** Self-hosted leak detection for the secrets you already own: a registry of
+fingerprints, git and CI scanning, and canary tokens. Secret values are never stored.
 
-> Статус: этапы 0–9 и 11–13 из [docs/architecture.md](docs/architecture.md): ядро отпечатков, схема БД,
-> журнал аудита, авторизация (пароль + обязательный TOTP), реестр секретов, извлечение кандидатов,
-> сканирование git и файлов, приём данных от CI, серверный воркер, CLI для CI, веб-интерфейс и TLS-edge
-> с mTLS для агентов. Алерты (10) и E2E (14) — следующие этапы.
+[![CI](https://github.com/MaxsudAmirxanov/secrettrace/actions/workflows/ci.yml/badge.svg)](https://github.com/MaxsudAmirxanov/secrettrace/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+![Rust 1.89+](https://img.shields.io/badge/rust-1.89%2B-orange.svg)
+![Status: alpha](https://img.shields.io/badge/status-alpha-yellow.svg)
 
-## Требования
+**English** · [Русский](README.ru.md)
 
-- Rust 1.89+ (`rustup`), Docker с Compose v2, `openssl`, `make`.
+> **Status: alpha.** It works end to end and is covered by unit, integration and E2E tests, but it has had no
+> external security review and there is no tagged release yet. Read [Limitations](#status-and-limitations)
+> before you deploy it anywhere that matters.
 
-## Быстрый старт (Docker Compose)
+## What it is
 
-```sh
-make secrets      # создаёт deploy/secrets/* (пароли БД, pepper); в git не попадают
-make pki          # CA и сертификат edge в deploy/pki/out/ (HOSTS="st.example.com" — доп. имена)
-make up           # postgres → migrate → server + worker + edge (nginx); make up делает secrets и pki сам
-curl -s --cacert deploy/pki/out/ca/ca.crt https://localhost/healthz   # {"status":"ok"}
-make admin NAME=alice            # первый администратор, затем https://localhost
+Pattern scanners like gitleaks and TruffleHog answer "does this look like a secret?". SecretTrace answers a
+different question: **"is this one of *our* secrets, whose is it, and is it allowed to be here?"**
+
+You register each secret once. The value is normalized and hashed on your machine (CLI or browser), and the
+server keeps only a keyed fingerprint, an owner, an expiry date and a set of *allow rules* (the places where
+that secret is supposed to live). Every scan of a repository, a directory or a CI job then reports exact
+matches against that registry.
+
+- **No false positives on registered secrets.** A match is an exact fingerprint match, with a name and an
+  owner attached, not a regex guess.
+- **Secrets without a format.** Database passwords, internal tokens and values in MCP or app configs have no
+  recognizable prefix. They are still found, because matching does not depend on format.
+- **Leaks after rotation.** Revoked and rotated secrets stay in the registry. If an old value shows up again,
+  it is reported as a leak.
+- **Canary tokens in the same place.** Plant bait URLs and API keys where real secrets leak from (`.env`
+  files, wikis, CI variables, backups). When someone uses one, you get an alert in the same UI.
+
+It is meant to run **next to** a pattern scanner, not instead of one: the scanner finds unknown secrets, and
+SecretTrace tracks the known ones.
+
+## How it works
+
+```mermaid
+flowchart LR
+    subgraph clients[Your machines]
+        CLI["CLI / CI job<br/>extracts candidates,<br/>hashes them locally"]
+        UI["Web UI<br/>hashes the value<br/>in the browser"]
+    end
+    Bait["Anyone using<br/>a leaked canary"]
+
+    subgraph host[SecretTrace host]
+        Edge["nginx edge<br/>:443 TLS · :8443 mTLS · :8081 canary"]
+        Server["secrettrace-server<br/>HMAC with server pepper"]
+        Worker["worker<br/>scheduled git scans"]
+        DB[("Postgres")]
+    end
+
+    UI -- "TLS" --> Edge
+    CLI -- "mTLS + API token" --> Edge
+    Bait -- "HTTP" --> Edge
+    Edge --> Server --> DB
+    Worker --> DB
 ```
 
-Наружу публикуется только edge: `https://<host>/` (веб-интерфейс и API) и `https://<host>:8443/` (ingest
-по mTLS). По умолчанию порты слушают 127.0.0.1; `ST_EDGE_BIND=0.0.0.0` открывает их в сети. Браузер
-не знает частный CA: импортируйте `deploy/pki/out/ca/ca.crt` или выпустите сертификат edge у своего CA
-(см. [TLS и mTLS](#tls-и-mtls-edge)). При обновлении со стека без edge сначала выполните `docker compose down`:
-у сети `edge` теперь фиксированная подсеть, и compose пересоздаёт её.
+1. **Digest on the client.** `digest = SHA-256("secrettrace/v1\0" || normalize(value))`. The value never
+   leaves the machine. The browser uses a TypeScript port of the same code, checked against the shared test
+   vectors in `testdata/digest_vectors.json`.
+2. **Fingerprint on the server.** The server stores `HMAC(pepper, digest)`. Pepper keys are versioned and can
+   be rotated. A database dump alone is not enough to test guesses offline.
+3. **Two-phase ingest.** A scanner first sends the digests of all candidates and learns which ones are
+   registered (`/match`). Then it sends locations only for those (`/findings`). Unregistered candidates are
+   never stored. Both endpoints share a per-token budget, so the API is not a cheap oracle for guessing
+   passwords.
+4. **Allow rules.** Each location is checked against the secret's rules (source type, URI, path glob,
+   environment). A match outside the rules is a violation.
 
-**Сделайте резервную копию `deploy/secrets/pepper_keys`, `deploy/secrets/data_key` и `deploy/secrets/canary_key`.** Без pepper отпечатки
-нельзя ни проверить, ни пересчитать: все секреты придётся регистрировать заново. Без data key пропадут
-TOTP-привязки: всем пользователям придётся сбрасывать MFA.
+## Features
 
-## Пользователи и вход
+**Registry and access**
+- Secrets with owner, purpose, expiry, status (`active`, `revoked`, `rotated`) and allow rules.
+- Password login plus mandatory TOTP for every role. Roles are `viewer`, `operator` and `admin`.
+- Tamper-evident audit log (hash chain). The runtime database role cannot `UPDATE`, `DELETE` or `TRUNCATE` it.
+- Scoped API tokens for agents and CI. Tokens can be bound to a client certificate CN, a source URI pattern
+  and an environment.
+
+**Scanning**
+- `secrettrace scan fs` and `secrettrace scan git`. Git scans cover all branches, stash and full history.
+  Each unique blob is read once, however many commits contain it.
+- Candidate extraction: 24 known-format rules (`AKIA…`, `ghp_…`, `glpat-…`, `xoxb-…`, `sk-ant-…`, JWT and
+  others), PEM keys, passwords in URLs, key/value pairs in `.env`, YAML, JSON, XML, `.netrc` and connection
+  strings, `Authorization` headers and high-entropy strings. Base64, percent-encoding and JSON escaping are
+  decoded recursively, up to three levels deep.
+- Linear-time extraction on hostile input: no backtracking regex, plus size and candidate limits.
+- Hostile-repository hardening: no symlink following, no inherited `GIT_DIR`, replace refs disabled,
+  revisions passed after `--end-of-options`.
+- A server-side worker scans git repositories on a schedule and incrementally. It uses an outbound host
+  allowlist, SSRF and DNS-rebinding checks, and credentials pinned to specific hosts.
+
+**CI**
+- Exit codes are built for pipelines: `0` clean, `1` registered secrets found, `2` error or incomplete scan.
+  An incomplete scan never looks clean.
+- Ready-made examples for [GitHub Actions](deploy/ci/github-actions.yml) and
+  [GitLab CI](deploy/ci/gitlab-ci.yml).
+
+**Canary tokens**
+- `url` canaries (a link) and `api_key` canaries (a service URL plus an `ak_…` key in `.env` format).
+- A dedicated edge listener answers every request with the same `404`, so a hit looks the same as a miss.
+  Only an HMAC of each token is stored.
+- `api_key` canaries are also registered as secrets, so a scan that finds one reports it like any other leak.
+
+**Deployment**
+- Docker Compose stack: Postgres, a one-shot migration, server, worker and an nginx edge.
+- TLS for the UI and API. mTLS with CRL checks for ingest. A small PKI script (`make pki`, `make client-cert`,
+  `make revoke-cert`).
+- A distroless server image, non-root containers, read-only filesystems, dropped capabilities, Docker secrets and separate database roles
+  for migrations and runtime.
+
+## Quick start
+
+Requirements: Docker with Compose v2, `openssl` and `make`. Rust 1.89+ is needed only to build locally.
 
 ```sh
-make admin NAME=alice     # создать администратора (пароль вводится скрыто, минимум 12 символов)
+git clone https://github.com/MaxsudAmirxanov/secrettrace.git
+cd secrettrace
+
+make up                 # generates secrets and a local CA, builds images, starts the stack
+curl -s --cacert deploy/pki/out/ca/ca.crt https://localhost/healthz    # {"status":"ok"}
+make admin NAME=alice   # first admin; then open https://localhost and enroll TOTP
 ```
 
-Вход проходит в два шага, TOTP обязателен для всех ролей:
+The first build takes a few minutes. Ports bind to `127.0.0.1` by default. The browser does not trust the
+generated CA: import `deploy/pki/out/ca/ca.crt` or use a certificate from your own CA.
 
-1. `POST /api/v1/auth/login` `{username, password}`: выдаётся сессия на 5 минут, годная только для MFA.
-2. При первом входе `POST /api/v1/auth/mfa/enroll` возвращает `otpauth://`-ссылку для приложения-аутентификатора.
-3. `POST /api/v1/auth/mfa/verify` `{code}`: выдаётся новая полноценная сессия (12 ч, тайм-аут бездействия 30 мин).
+The worker refuses to start until you set `ST_WORKER_ALLOWED_HOSTS` (for example `github.com,gitlab.example`)
+in `.env` next to `docker-compose.yml`. This is deliberate: without an allowlist an operator could point it at
+your internal network.
 
-Изменяющие запросы требуют заголовок `X-CSRF-Token`. Токен возвращают `login`, `verify` и `GET /auth/me`.
-Каждый код TOTP принимается один раз. После 5 неудачных попыток (пароль или код) учётная запись
-блокируется на 15 минут. Ответы на неудачный вход одинаковы, чтобы по ним нельзя было узнать,
-существует ли пользователь. Причина неудачи пишется в журнал аудита.
+**Back up `deploy/secrets/pepper_keys`, `data_key` and `canary_key`.** Without the pepper, fingerprints can
+be neither checked nor recomputed. Without the data key, every user has to re-enroll TOTP.
 
-| Роль | Права |
-|---|---|
-| `viewer` | только чтение |
-| `operator` | секреты, источники, сканы, алерты |
-| `admin` | всё, включая API-токены, каналы уведомлений и журнал аудита |
+## Using it
 
-Администрирование из командной строки (действия пишутся в аудит):
+Register a secret. The CLI reads the value without echoing it, hashes it, wipes it from memory and sends only
+the digest:
 
 ```sh
-docker compose run --rm --no-deps server reset-mfa   --username alice   # сбросить TOTP и все сессии
-docker compose run --rm --no-deps server unlock-user --username alice   # снять блокировку
-```
+cargo install --path crates/st-cli      # installs the `secrettrace` binary
 
-**API-токены** для агентов и CI создаёт администратор: `POST /api/v1/api-tokens`
-`{name, kind: agent|ci|automation, scopes: [ingest:profile|ingest:match|ingest:findings], expires_in_days,
-cert_cn?, source_type?, source_uri_pattern?, environment?}`. Значение токена (`stk_…`) показывается один раз,
-хранится только его SHA-256. Токен передаётся как `Authorization: Bearer stk_…`. Отзыв:
-`DELETE /api/v1/api-tokens/{id}`, действует сразу. Необязательные привязки:
-
-| Поле | Действие |
-|---|---|
-| `cert_cn` | токен принимается только вместе с клиентским сертификатом этого CN, проверенным edge (mTLS). При `ST_INGEST_REQUIRE_CLIENT_CERT=true` (так в compose) обязателен |
-| `source_type`, `source_uri_pattern` | токен может сообщать только об источниках этого типа и с URI по glob (`*` не пересекает `/`, `**` пересекает) |
-| `environment` | сканы записываются под этим окружением; заявить другое токен не может (иначе он подобрал бы окружение под allow-правило) |
-
-Нарушение привязки источника или окружения даёт 403 с объяснением. Неверный или отсутствующий сертификат
-даёт тот же 401, что и неверный токен; причина пишется в лог сервера (`API token refused`).
-
-## Локальная разработка
-
-```sh
-make db-up                         # временный Postgres 17 на 127.0.0.1:54329 (роли st_owner/st_app)
-cp .env.example .env               # вставьте ключи из: cargo run -p st-server -- gen-pepper / gen-data-key
-set -a; . ./.env; set +a
-cargo run -p st-server -- migrate
-cargo run -p st-server -- create-user --username alice --role admin
-cargo run -p st-server -- serve
-cargo run -p st-server -- verify-audit
-```
-
-## Веб-интерфейс
-
-Каталог `web/`: React 18 + TypeScript, Vite, Tailwind, TanStack Query; без внешних CDN, шрифтов и счётчиков.
-Сервер раздаёт собранный интерфейс сам, если задан `ST_WEB_DIR` (в Docker-образе он уже собран и задан);
-все файлы читаются в память при старте.
-
-| Раздел | Кто видит | Что делает |
-|---|---|---|
-| Обзор | все | открытые и исторические нарушения, график за 30 дней, скомпрометированные и истекающие секреты, последние сканы |
-| Находки | все | все места всех секретов: фильтры «нарушение / разрешено», «в коде / только в истории», поиск, ссылка на файл в коммите (GitHub, GitLab) |
-| Реестр секретов | все; изменения — operator | регистрация, карточка, allow-правила, отзыв и пометка «заменён» |
-| Источники, Сканы | все; запуск — operator | git-репозитории с расписанием, ручной и полный скан, отмена, счётчики |
-| API-токены, Пользователи, Журнал аудита | admin | выпуск и отзыв токенов; роли, отключение, сброс TOTP, разблокировка, новый пароль; журнал с проверкой hash-chain |
-| Учётная запись | все | смена своего пароля (остальные сессии завершаются) |
-
-Безопасность интерфейса:
-
-- **Значение секрета не покидает браузер.** Нормализация и digest — порт `st-core` на TypeScript
-  (`web/src/crypto`), проверенный на тех же векторах `testdata/digest_vectors.json`. Поле очищается до отправки.
-- Сессия — только `HttpOnly; SameSite=Strict` cookie; CSRF-токен живёт в памяти и восстанавливается через
-  `/auth/me`. В `localStorage` хранится лишь выбранная тема.
-- CSP `script-src 'self'; style-src 'self'` без `unsafe-inline`, `frame-ancestors 'none'`, `Referrer-Policy:
-  no-referrer`. QR-код для TOTP рисуется локально. Редирект после входа — только на свои пути.
-- Права в интерфейсе — подсказка; решает сервер.
-
-Разработка:
-
-```sh
-make web-install      # npm ci (точные версии из package-lock.json)
-make web-dev          # :5173, проксирует /api на ST_API_URL (по умолчанию 127.0.0.1:8080)
-make web-test         # vitest: crypto-векторы, вход с TOTP, регистрация без отправки значения, CSRF
-make web-lint         # eslint + tsc
-make web-build        # web/dist; затем ST_WEB_DIR=web/dist secrettrace-server serve
-```
-
-Для dev-сервера на `http://` нужен `ST_COOKIE_SECURE=false` у API.
-
-## Тесты и проверки
-
-```sh
-make test         # unit + интеграционные (поднимает Postgres в Docker)
-make test-unit    # без БД
-make lint         # rustfmt --check + clippy pedantic с -D warnings
-make audit        # cargo audit + npm audit (production-зависимости UI)
-make web-test     # тесты интерфейса
-make e2e          # сквозной тест настоящего compose-стенда (см. ниже)
-```
-
-Интеграционные тесты получают отдельную БД на каждый тест.
-
-- `crates/st-server/tests/db.rs`: целостность hash-chain аудита, обнаружение подмены и удаления строк, откат
-  вместе с транзакцией, линейность цепочки при конкурентной записи, запрет `UPDATE/DELETE/TRUNCATE`
-  для рантайм-роли, CHECK-ограничения политики hints.
-- `crates/st-server/tests/secrets.rs`: регистрация без утечки digest (ни в ответ, ни в аудит), дубликаты
-  в том числе после ротации pepper, роли и CSRF, валидация с ответами problem+json, частичное обновление
-  с различием «поле не передано / null», конечные статусы, пагинация без дублей, буквальные `%` и `_`
-  в поиске, места нахождения и счётчик нарушений.
-- `crates/st-server/tests/openapi.rs`: закоммиченный `docs/openapi.json` совпадает с кодом; у всех закрытых
-  операций объявлена авторизация, у изменяющих — CSRF; схемы ответов не содержат digest и отпечатков.
-  Перегенерировать спецификацию: `UPDATE_OPENAPI=1 cargo test -p st-server --test openapi`.
-- `crates/st-extract/tests/extract.rs`: образец для каждого правила известных форматов и отказ на склеенных
-  токенах, `.env`, Kubernetes Secret с вложенными base64 и JSON, Docker `auth`, заголовки `Authorization`,
-  исходный код, XML, `.netrc`, ADO.NET, JDBC, экранированный PEM в JSON сервисного аккаунта, отсутствие
-  открытых значений и digest в выводе, лимиты, линейное время на патологических входах, случайные входы.
-- `crates/st-source/tests/sources.rs`: обход дерева с исключениями, UTF-16, обрезка больших файлов, симлинки
-  на файлы и каталоги вне дерева и FIFO не читаются, ошибки чтения без содержимого, одинаковый результат
-  при 1 и 4 потоках; в git — один blob на одно содержимое при любом числе коммитов, история через
-  `--find-object` в топологическом порядке, инкрементальный `^commit`, все ветки и stash, подмена blob
-  через `git replace` не скрывает секрет, опасные ревизии, пустой репозиторий, досрочная остановка.
-- `crates/st-cli/tests/cli.rs`: `digest`, `extract` и `scan fs|git` как чёрный ящик; digest печатается только
-  по флагу; унаследованные `GIT_DIR`/`GIT_INDEX_FILE` игнорируются; непрочитанные файлы дают ошибку.
-- `crates/st-server/tests/ingest.rs`: полный цикл скана; allow-правила при приёме, в том числе по окружению;
-  одно место на путь и `in_current_state` (OR внутри скана, сброс после полного скана); все версии pepper;
-  отозванные и ротированные секреты; scopes, чужой скан, отозванный токен, cookie вместо токена;
-  завершённые и просроченные сканы; URI с учётными данными и варианты обхода проверки; 30+ вариантов
-  невалидных тел; ошибки 422 не возвращают присланные значения; общий бюджет `/match` и `/findings`,
-  лимит стартов; полный скан не сбрасывает чужие и более свежие места; 5000 находок в лимите тела;
-  аудит без digest и целостность цепочки.
-- `crates/st-server/tests/secrets.rs` дополнительно: замена allow-правил пересчитывает `is_allowed`
-  у уже найденных мест и счётчик нарушений.
-- `crates/st-server/tests/sources.rs`: CRUD источников, роли и CSRF, 30+ невалидных тел (учётные данные
-  в URI, `credential_ref`, частый или неверный cron, неизменяемые `type`/`uri`), дубликаты, ручной запуск
-  и 409 при активной задаче, отмена, отключение и удаление отменяют задачи, фильтры и пагинация,
-  `scan_state` не виден в ответах.
-- `crates/st-server/tests/worker.rs`: локальные репозитории: места из истории и `HEAD` с commit, blob,
-  окружением и allow-правилами; незарегистрированное не сохраняется; инкрементальный скан читает только
-  новые blob'ы и дерево `HEAD`; удалённый файл → `no_longer_present`, места API-токенов не трогаются;
-  переписанная история; странные пути; два конкурентных захвата берут разные задачи; истёкшая аренда,
-  повторы с backoff, лимит попыток; отмена, отключение, удаление; остановка цикла; неподдерживаемые URI
-  и хосты; отсутствующий, симлинкнутый и пустой credential без утечки содержимого; ssh без known_hosts;
-  планировщик ставит одну задачу на источник; жнец закрывает брошенные сканы API; удаление зеркал.
-- `crates/st-server/tests/ui_api.rs`: сводка и общий список находок (фильтры, буквальные `%`, курсор,
-  нет digest и отпечатков), имя источника у сканов, управление пользователями (создание, роли, отключение
-  завершает сессии, сброс TOTP, разблокировка, новый пароль, запрет менять себя, гонка двух администраторов
-  оставляет одного), смена своего пароля, журнал аудита (фильтр по префиксу, курсор, обнаружение подмены),
-  раздача интерфейса с CSP и 404 problem+json для API.
-- `web/src/**/*.test.ts(x)`: digest на общих векторах, вход с привязкой TOTP, регистрация секрета без
-  отправки значения, CSRF только на изменяющих запросах, защита редиректа, генерация паролей.
-- `crates/st-server/tests/auth.rs`: полный вход с привязкой TOTP, ротация сессии после MFA, хранение seed
-  только в зашифрованном виде, повторное использование кода, CSRF, одинаковые ответы и блокировка,
-  rate-limit, роли, выпуск, проверка и отзыв API-токенов, отсутствие токенов и имён в аудите, сброс MFA.
-- `crates/st-server/tests/edge.rs`: CN сертификата принимается только от доверенного прокси (повтор
-  и некорректный заголовок — «нет сертификата»), обязательная привязка в режиме require, отказ не считается
-  использованием токена, привязки источника и окружения.
-- `crates/st-cli/tests/server.rs`: бинарник `secrettrace` против настоящего сервера: коды выхода, места
-  в БД, вырезание токена из URL `origin`, ошибки токена и scope.
-
-### Сквозной тест (E2E)
-
-`make e2e` (`deploy/e2e/run.sh`) собирает образы server, worker и cli из текущего дерева, поднимает весь
-стенд в отдельном compose-проекте `secrettrace-e2e` (порты 28443/28444, подсеть edge 10.214.0.0/24,
-свои секреты и PKI во временном каталоге) и проверяет его только снаружи, через HTTPS и клиентские
-сертификаты. Рабочий dev-стенд и `deploy/secrets`, `deploy/pki/out` не затрагиваются; после прогона
-проект, его тома, образы с тегом `e2e` и временный каталог удаляются (`KEEP=1` оставляет стенд,
-`KEEP_IMAGES=1` — только образы).
-
-Что проверяется: готовность через edge и закрытый порт сервера; вход администратора с привязкой TOTP,
-`__Host-` cookie, HSTS и CSP; отказ выпускать токен без `cert_cn`; регистрация по digest из образа CLI;
-`scan git` образом CLI по mTLS — код 1 и два места (`HEAD` и история) с окружением из привязки токена;
-allow-правило пересчитывает места, повторный скан — код 0, `--fail-on found` — 1; ingest на TLS-порту
-(в том числе с подделанным `X-SecretTrace-Client-CN`) — 403; mTLS без сертификата — 403; чужой CN — 401;
-источник и окружение вне привязки — 403; отозванный сертификат после `pki.sh revoke` и reload — 403;
-серверный скан воркером `file://`-источника; `verify-audit` и наличие ожидаемых событий в журнале.
-Нужны Docker с compose v2, git, openssl, curl, jq и python3; первый прогон собирает release-образы
-(несколько минут, около 2 ГБ кеша сборки).
-
-## Реестр секретов
-
-Спецификация API: [docs/openapi.json](docs/openapi.json); на сервере отдаётся по `GET /api/v1/openapi.json`.
-
-Проще всего — из CLI или веб-интерфейса:
-
-```sh
 secrettrace register --server https://st.example.com -u alice \
-  --name prod-aws-deploy --type api-key --owner platform --expires 2027-06-01 \
-  --allow-rules rules.json               # необязательно: JSON-массив правил, как в API ниже
-secrettrace register … --type private-key --stdin < deploy.pem
+  --name prod-db-password --type password --owner platform --expires 2027-06-01
 ```
 
-`register` сначала читает значение (скрытый ввод или `--stdin`), считает digest и затирает значение,
-затем спрашивает с терминала пароль и код TOTP, делает один `POST /secrets` и выходит из сессии.
-Сессия нигде не сохраняется; API-токены для реестра не подходят (они только для ingest). Если TOTP
-у учётной записи ещё не привязан, первый вход нужно выполнить в веб-интерфейсе.
-
-То же через API:
+Scan in CI (the token is created by an admin, the client certificate with `make client-cert CN=ci-infra`):
 
 ```sh
-# 1. digest считается локально; значение не покидает машину
-secrettrace digest --type api-key > digest.json
-# 2. регистрация (сессия оператора + X-CSRF-Token)
-POST /api/v1/secrets
-{ "name": "prod-aws-deploy", "type": "api_key", "owner": "platform",
-  "digest": "<из digest.json>", "hints": { "prefix": "AKIA", "length": 20 },
-  "allow_rules": [ { "source_type": "git_repo", "uri_pattern": "git@github.com:acme/infra-secrets.git",
-                     "path_pattern": "sealed/**" } ],
-  "expires_at": "2027-06-01T00:00:00Z" }
-```
+export SECRETTRACE_TOKEN=stk_...          # never pass tokens as arguments: argv is visible in `ps`
+export SECRETTRACE_CA_CERT=ca.crt
+export SECRETTRACE_CLIENT_CERT=client.crt SECRETTRACE_CLIENT_KEY=client.key
 
-| Метод | Путь | Роль | Назначение |
-|---|---|---|---|
-| GET | `/api/v1/secrets?status=&type=&owner=&q=&limit=&cursor=` | viewer | список с фильтрами, курсорная пагинация |
-| POST | `/api/v1/secrets` | operator | регистрация по digest |
-| GET | `/api/v1/secrets/{id}` | viewer | карточка: маска, allow-rules, число мест и нарушений |
-| PATCH | `/api/v1/secrets/{id}` | operator | владелец, назначение, срок, статус, allow-rules (заменяются целиком) |
-| GET | `/api/v1/secrets/{id}/locations?is_allowed=` | viewer | где найден секрет |
-
-- **Дубликаты.** Повторная регистрация того же значения отклоняется с 409, в том числе если значение
-  зарегистрировано под старой версией pepper. Повторное имя тоже даёт 409. Попытка с уже зарегистрированным
-  значением пишется в аудит (`secret.create.duplicate`, без digest): иначе регистрация была бы бесшумным
-  способом проверить, зарегистрирован ли пароль. Не больше 100 попыток регистрации в час на пользователя (429).
-- **Статусы.** `revoked` и `rotated` конечные: вернуть секрет в `active` нельзя, новое значение регистрируется
-  как новый секрет.
-- **Allow-rules.** Glob-шаблоны: `*` не пересекает `/`, `**` пересекает, `a/**/b` совпадает и с `a/b`.
-  Все заданные поля правила (тип источника, URI, путь, окружение) должны совпасть.
-- **Ответы** не содержат digest, отпечаток и версию pepper. Ошибки приходят в формате RFC 7807
-  (`application/problem+json`).
-
-## Приём результатов сканирования (ingest)
-
-Машинный API для агентов и CI. Авторизация только API-токеном (`Authorization: Bearer stk_…`), без cookie
-и CSRF. Скан принадлежит токену, который его начал: для других токенов его не существует (404).
-
-| Метод | Путь | Scope | Назначение |
-|---|---|---|---|
-| POST | `/api/v1/ingest/scans` | `ingest:profile` | начать скан: источник `{type, uri}`, `environment`, `full`; ответ — id и лимиты |
-| POST | `/api/v1/ingest/scans/{id}/match` | `ingest:match` | до 10 000 digest'ов → только совпавшие, без имён и id |
-| POST | `/api/v1/ingest/scans/{id}/findings` | `ingest:findings` | до 5000 мест: путь, строка, blob/commit, детектор, `in_current_state` |
-| POST | `/api/v1/ingest/scans/{id}/complete` | `ingest:profile` | `succeeded`/`failed`, счётчики, короткая ошибка |
-
-- **Двухфазность.** Клиент сначала узнаёт, какие digest'ы зарегистрированы, и отправляет места только
-  для них. Сервер перепроверяет каждый digest в `/findings`; места для незарегистрированных не сохраняются.
-- **Оракул.** `/match` и `/findings` оба отвечают на вопрос «зарегистрирован ли этот digest», поэтому они
-  делят один бюджет на токен: уникальные digest'ы в час и запросы в минуту. Старты сканов тоже ограничены
-  (30 в минуту). Каждый вызов пишется в аудит (только счётчики).
-- **Источник** находится или создаётся по `(type, uri)`. URI с учётными данными отклоняется: иначе секрет
-  оказался бы в самой таблице источников. Отклоняются `https://user:pass@…` и варианты, которые браузеры
-  трактуют так же (`https:///u:p@h`, `https:\\u:p@h`), `user:pass@host/repo` и параметры вроде
-  `?private_token=` или `#access_token=`. Любой `user@` после `://` тоже отклоняется (в `https://TOKEN@host`
-  токен стоит на месте имени), поэтому SSH-адрес передаётся как `git@host:org/repo.git`, а Windows-путь —
-  как `file:///C:/…`. Отключённый источник даёт 409.
-- **Место** — одно на (секрет, источник, путь): разные blob'ы и строки одного файла схлопываются.
-  В `locator` лежат путь, строка, blob, commit, детектор и имя ключа, но не содержимое и не digest.
-- **Allow-правила** применяются при каждом приёме; при замене правил через `PATCH /secrets/{id}`
-  пересчитываются все уже найденные места этого секрета.
-- **Полный скан** (`full: true`) при успешном завершении снимает `in_current_state` с мест источника,
-  которых в нём не было: секрет удалили из текущего состояния, но история остаётся. Снимаются только места,
-  которые раньше сообщал тот же токен и которые не видел ни один скан после начала этого: чужой токен
-  не может «закрыть» находки, а параллельные сканы не сбрасывают друг друга.
-- **Зависший скан** старше 24 часов можно только завершить со статусом `failed`.
-- **Окружение и источник** токен по умолчанию указывает сам и может подобрать их под allow-правило.
-  Для токенов CI и агентов задавайте привязки `environment` и `source_uri_pattern` (см. API-токены выше).
-- Совпадения с `revoked` и `rotated` секретами тоже записываются: утечка старого значения остаётся утечкой.
-- Клиент — `secrettrace scan … --server` (см. [CLI в CI](#cli-в-ci-отправка-на-сервер-и-коды-выхода)).
-  В compose ingest доступен только по mTLS на порту 8443 (см. [TLS и mTLS](#tls-и-mtls-edge)).
-
-## Источники и серверное сканирование (воркер)
-
-Git-репозитории можно сканировать на самом сервере: по расписанию или вручную. Это делает отдельный
-процесс `secrettrace-server worker` (сервис `worker` в compose, образ с git и ssh).
-
-| Метод | Путь | Роль | Назначение |
-|---|---|---|---|
-| GET | `/api/v1/sources?type=&enabled=` | Viewer | список источников |
-| POST | `/api/v1/sources` | Operator | создать: `name`, `type`, `uri`, `environment`, `credential_ref`, `schedule`, `config` |
-| GET / PATCH / DELETE | `/api/v1/sources/{id}` | Viewer / Operator | `type` и `uri` менять нельзя |
-| POST | `/api/v1/sources/{id}/scans` | Operator | поставить скан в очередь (202); `{"full": true}` — вся история заново |
-| GET | `/api/v1/scans?source_id=&status=&trigger=` | Viewer | сканы, включая сканы API-токенов |
-| GET | `/api/v1/scans/{id}` | Viewer | статус, попытки, счётчики, ошибка |
-| POST | `/api/v1/scans/{id}/cancel` | Operator | отменить задачу воркера |
-
-Пример (сессия администратора или оператора, CSRF-токен из ответа на вход):
-
-```json
-POST /api/v1/sources
-{ "name": "infra-app", "type": "git_repo", "uri": "https://git.example/infra/app.git",
-  "environment": "prod", "credential_ref": "git_example_ro", "schedule": "0 3 * * *" }
-```
-
-- **Адрес**: `https://host/path`, `ssh://host/path` или `git@host:org/repo.git`. Учётные данные в URI
-  запрещены, как и в ingest; IP-адреса вместо имён — только если они явно перечислены в списке хостов.
-- **Разрешённые хосты обязательны.** Воркер не запускается без `ST_WORKER_ALLOWED_HOSTS`
-  (например, `github.com,gitlab.example` в `.env` рядом с `docker-compose.yml`): иначе оператор мог бы
-  направить его на любой хост, в том числе во внутреннюю сеть. Отключается только явным
-  `ST_WORKER_ALLOW_ANY_HOST=true`. Пока переменная не задана, сервис `worker` в compose перезапускается
-  с ошибкой в логе. Даже с `ALLOW_ANY_HOST` внутренние имена (`localhost`, `postgres`, `*.local`,
-  `*.internal`…) отвергаются, а остальные резолвятся до fetch: если хоть один адрес не публичный
-  (loopback, частные сети, link-local, CGNAT…), скан завершается ошибкой; git подключается к проверенному адресу.
-- **Доступ к приватным репозиториям** — по ссылке: `credential_ref` это имя файла в
-  `deploy/worker/git-credentials/` (в контейнере `/run/git-credentials`). Сервер хранит только имя.
-  - **Привязка к хостам.** Рядом с файлом обязателен `<имя>.hosts`: по одному хосту на строку (`#` —
-    комментарий). Credential используется только для перечисленных хостов, иначе скан падает с
-    `credential "<имя>" is not allowed for this host`. Привязку задаёт тот, кто кладёт файлы на сервер,
-    а не оператор через API: оператор не может отправить токен на свой хост.
-  - HTTPS: в файле токен или пароль; имя пользователя — `config.username` (по умолчанию `x-access-token`).
-    git получает его через askpass, который отвечает только на запрос пароля для привязанного хоста.
-  - SSH: в файле приватный ключ OpenSSH; ключи хостов — в `deploy/worker/ssh_known_hosts`
-    (`ssh-keyscan host >> deploy/worker/ssh_known_hosts`, сверив отпечаток), без них ssh-источники не сканируются.
-  - Файлы должны быть читаемы пользователем контейнера (uid 65532), например `chmod 644`; каталог
-    `deploy/worker/` остаётся 0700 и в git не попадает. Используйте токены только на чтение.
-- **Расписание** — cron из 5 полей в UTC (`0 3 * * *` — каждый день в 03:00), не чаще раза в 5 минут.
-  На источник одновременно не больше одной задачи в очереди или в работе; повторный запуск даёт 409.
-- **Инкрементальность.** Воркер держит bare-зеркало репозитория и после успешного скана запоминает коммиты
-  веток и тегов. Следующий скан читает только новую историю и всё текущее дерево `HEAD`, поэтому файлы,
-  из которых секрет удалили, получают `in_current_state = false`. Если с прошлого скана в реестре появились
-  секреты (или сменились версии pepper), история читается целиком: новый секрет мог лежать в старых коммитах.
-  Ветки `refs/pull/*` не скачиваются.
-- **Сбои**: сетевые ошибки повторяются с растущей паузой (до 3 попыток), ошибки настройки (нет credential,
-  хост не разрешён, неизвестный ключ хоста, репозиторий больше лимита) — сразу `failed`. Ошибка — фиксированная
-  категория (`git fetch failed: authentication failed`, `… could not connect`, `… TLS error` и т.п.):
-  текст удалённого сервера и пути не сохраняются.
-- **Отключение или удаление** источника отменяет его задачи. Найденные места остаются.
-- **Ресурсы**: размер зеркала ограничен `ST_WORKER_MAX_REPO_BYTES` (2 ГиБ, fetch прерывается), объекты
-  проверяются при приёме (`transfer.fsckObjects`), тайм-ауты медленного соединения, отмена убивает git
-  со всеми дочерними процессами; в compose у воркера `mem_limit`, `pids_limit`, без core dump.
-- **Ограничения**: зеркала не проходят `git gc` (недостижимые после force-push объекты остаются на диске —
-  шифруйте том); воркер использует ту же роль БД, что и сервер; места воркера и CI-сканов одного URI —
-  одни и те же строки.
-
-## CLI: digest секрета без отправки значения
-
-```sh
-cargo run -p st-cli -- digest --type api-key           # скрытый ввод
-secrettrace digest --type private-key --stdin < key.pem
-```
-
-Значение нормализуется и хешируется локально, затем затирается в памяти. На выходе — digest, допустимые
-по политике подсказки и маска, например `AKIA…`. Значение нельзя передать аргументом: argv виден в `ps`
-и истории shell.
-
-## CLI: какие кандидаты видит сканер
-
-```sh
-secrettrace extract .env k8s/secret.yaml           # JSON Lines: путь, строка, детектор, маска
-secrettrace extract --min-confidence medium -  < build.log
-```
-
-Это диагностическая команда для локальной проверки. Открытые значения она не печатает никогда, digest —
-только с `--show-digests` (не используйте её в логах CI: digest слабого пароля можно подобрать). Сравнение
-с реестром делает `scan … --server`. Что и как находится:
-
-| Детектор | Примеры | Уверенность |
-|---|---|---|
-| `known` | `AKIA…`, `ghp_…`, `github_pat_…`, `glpat-…`, `xoxb-…`, `sk_live_…`, `AIza…`, `sk-ant-…`, JWT, токен Telegram-бота — 24 правила | high |
-| `pem`, `ssh_public_key` | приватные ключи (high), сертификаты и публичные ключи (low): их отслеживают ради графа распространения | high / low |
-| `url_password`, `url` | `postgres://app:p%40ss@db/app`: пароль (и его `%`-декодированная форма) и вся строка подключения | medium |
-| `key_value` | `DB_PASSWORD=…`, `"apiKey": "…"`, `--password '…'`, `<password>…</password>`, `.netrc`, `Server=…;Password=…;` | medium |
-| `auth_header`, `basic_auth` | `Authorization: Bearer …`, пароль из `Basic base64(user:pass)` и Docker `auth` | medium |
-| `high_entropy` | случайные токены без контекста (буквы и цифры, энтропия ≥ 3.5 бит, hex ≥ 3.0) | low |
-
-- **Декодеры** работают рекурсивно до трёх уровней: base64 (data в Kubernetes Secret), `%XX`, JSON-экранирование
-  (`{\"password\":\"…\"}` в логах). Место находки указывает на внешний закодированный фрагмент,
-  цепочка декодирований записывается в `encodings`.
-- **Ключи** считаются чувствительными по имени: `password`, `pwd`, `secret`, `token`, `api_key`, `auth`, `dsn`…
-  Метаданные (`password_file`, `token_uri`, `secret_name`) и шаблоны (`${VAR}`, `{{ … }}`, `<your-token>`)
-  пропускаются. Значения, похожие на идентификатор в коде (`password: SecretString`), digest'ируются, но получают
-  уверенность low.
-- **Нормализация** та же, что при регистрации (`st-core`), поэтому совпадение — это просто равенство digest.
-- **Ограничения:** до 16 МиБ на документ и 10 000 кандидатов; бюджет на декодирование. Время работы линейное:
-  у `regex` нет backtracking, а PEM-блоки сопоставляются в один проход.
-
-## CLI: сканирование дерева и git-истории
-
-```sh
-secrettrace scan fs . --exclude node_modules --exclude '*.min.js'
-secrettrace scan git . --locate --min-confidence medium     # вся история, все ветки и stash
-secrettrace scan git /srv/mirror.git --rev main --rev ^3687a59   # только новое с прошлого скана
-```
-
-Вывод — те же JSON Lines, что у `extract`, плюс источник: `root` и `path` для файлов; `blob`, `path`
-и `in_head` (blob есть в текущем `HEAD`) для git. С `--locate` добавляется `occurrences`: коммиты,
-в которых blob появился (`added`) или исчез (`removed`). Итог пишется в stderr. Если какие-то файлы
-не удалось прочитать, команда завершается с кодом 2: неполный скан не должен выглядеть чистым.
-Сравнение с реестром — с `--server`, см. следующий раздел.
-
-**Git.** Каждое уникальное содержимое (blob) читается один раз, сколько бы коммитов его ни содержали:
-`rev-list --objects` → `cat-file --batch-check` → `cat-file --batch`. Синтетическая история
-из 3000 коммитов по 1000 файлов — это 16 тыс. blob'ов и 12 МиБ текста вместо 2 ГиБ при обходе
-каждого коммита; скан занимает 0,8 с. Где именно лежал найденный blob, выясняется отдельно и только
-для blob'ов с кандидатами, одним проходом `git log --find-object=…`.
-
-Защита от враждебных репозиториев и деревьев:
-
-- симлинки не разыменовываются ни при обходе, ни при открытии (`O_NOFOLLOW`), читаются только обычные
-  файлы; FIFO открывается неблокирующе и отбрасывается. Ссылка `config -> /run/secrets/pepper` не прочитается;
-- git запускается без унаследованных `GIT_DIR`, `GIT_INDEX_FILE` и других переменных расположения
-  (сканер может работать из хука чужого репозитория), без replace-refs (иначе `git replace` подменил бы
-  содержимое blob'а), без ленивой докачки в partial clone и без проверки подписей;
-- ревизии проверяются (не начинаются с `-`, без пробелов) и передаются после `--end-of-options`, поэтому
-  имя ветки не превратится в опцию вроде `--output=…`;
-- сообщения git в ошибках сокращаются до одной печатаемой строки; содержимое файлов в ошибки и логи
-  не попадает, буферы чтения затираются.
-
-Ограничения: файл больше `--max-file-size` (16 МиБ) читается частично и помечается `truncated`; blob больше
-`--max-blob-size` пропускается. Бинарные файлы (NUL в первых 8 КиБ) пропускаются, UTF-16 с BOM
-декодируется. Merge-коммиты в `--locate` не сравниваются (как в обычном `git log`). Путь blob'а без
-`--locate` — первый, под которым его встретил `rev-list`; полный список путей даёт `--locate`.
-
-## CLI в CI: отправка на сервер и коды выхода
-
-```sh
-export SECRETTRACE_TOKEN=stk_…            # токен kind=ci со scopes ingest:profile, ingest:match, ingest:findings
-export SECRETTRACE_CA_CERT=ca.crt         # CA edge (deploy/pki/out/ca/ca.crt), если он частный
-export SECRETTRACE_CLIENT_CERT=client.crt SECRETTRACE_CLIENT_KEY=client.key   # make client-cert CN=…
 secrettrace scan git . --server https://st.example.com:8443 --environment ci
-secrettrace scan fs /etc/app --server https://st.example.com:8443 --source-uri host:web-01/etc/app
 ```
 
-| Код | Значение |
-|---|---|
-| 0 | зарегистрированных секретов вне разрешённых мест нет |
-| 1 | найдены зарегистрированные секреты: по умолчанию только нарушения (`--fail-on violations`), с `--fail-on found` — любые, `--fail-on never` — никогда |
-| 2 | ошибка: нет токена, сервер недоступен или отклонил запрос, часть файлов не прочитана, неверные аргументы. Результат неизвестен — это не «чисто» |
-
-Протокол тот же, что у агентов (см. [ingest](#приём-результатов-сканирования-ingest)): старт скана → `/match`
-с уникальными digest'ами (пачками до лимита сервера) → `/findings` только для совпавших → `complete`.
-В stdout печатаются JSON Lines только по зарегистрированным секретам (маска, путь, строка, без digest),
-в stderr — id скана, URI источника и итог: сколько секретов и мест, сколько нарушений.
-
-- **Что уходит на сервер.** Digest'ы всех кандидатов (с учётом `--min-confidence` и `--no-entropy`)
-  и места только совпавших: путь, строка, blob, commit, детектор, имя ключа. Ни значений, ни содержимого файлов.
-- **Источник.** Для `scan git` URI по умолчанию — `origin` без учётных данных: токен, который GitLab CI
-  вставляет в URL (`https://gitlab-ci-token:…@host/…`), отрезается, как и query с fragment. Лучше задать
-  `--source-uri` явно — тем же URI, что у серверного источника этого репозитория, тогда воркер и CI
-  обновляют одни и те же места. Для `scan fs` `--source-uri` обязателен, путь — ровно один.
-- **Полнота.** Скан всегда полный (`full: true`): `scan git` вдобавок к истории (`--rev` её ограничивает)
-  всегда читает всё дерево `HEAD`, поэтому сервер может снять `in_current_state` с мест, которых больше нет.
-  Если часть файлов не прочитана, скан закрывается как `failed` (места не снимаются), код выхода 2.
-  При любой ошибке после старта скан тоже закрывается как `failed`.
-- **Токен** берётся только из `SECRETTRACE_TOKEN` или `--token-file`, не из аргументов (они видны в `ps`).
-  `--server` из окружения не читается: отправка данных всегда явная.
-- **Транспорт.** `http://` разрешён только для loopback (иначе нужен `--allow-http`), редиректы не выполняются
-  (токен не уйдёт на другой хост), собственный CA — `--ca-cert` или `SECRETTRACE_CA_CERT`, клиентский
-  сертификат для mTLS — `--client-cert`/`--client-key` или `SECRETTRACE_CLIENT_CERT`/`SECRETTRACE_CLIENT_KEY`
-  (только с `https://`). Ошибки соединения
-  и 502/503 повторяются до 4 раз с паузой 1–4 с; текст ошибок сервера печатается без управляющих символов.
-- **Лимиты.** Бюджет `ST_INGEST_DIGESTS_PER_HOUR` (по умолчанию 200 000 уникальных digest'ов в час на токен)
-  рассчитан на обычные репозитории; первый скан большой истории может упереться в него (429, код 2).
-
-Готовые примеры: [deploy/ci/github-actions.yml](deploy/ci/github-actions.yml) и
-[deploy/ci/gitlab-ci.yml](deploy/ci/gitlab-ci.yml). Они используют образ CLI
-(`docker build --target cli -t secrettrace-cli .`: `secrettrace` и git, пользователь 65532). Для git
-в образе отключена проверка владельца репозитория (`safe.directory=*`): checkout обычно принадлежит
-другому пользователю, а CLI только читает репозиторий и отключает `core.fsmonitor`.
-
-## TLS и mTLS (edge)
-
-nginx (`deploy/nginx/nginx.conf`) — единственная точка входа; сервер без опубликованного порта.
-
-| Порт (хост → контейнер) | Что | Доступ |
-|---|---|---|
-| 443 → 8443 | веб-интерфейс и `/api/v1/*` кроме ingest | TLS 1.2/1.3, HSTS; `/api/v1/ingest/` отвечает 403 |
-| 8443 → 9443 | только `/api/v1/ingest/*` и `/healthz` | mTLS: клиентский сертификат от CA SecretTrace, проверка по CRL |
-
-- **Привязка CN.** Edge передаёт CN проверенного сертификата в `X-SecretTrace-Client-CN`, на порту 443 этот
-  заголовок всегда очищается. Сервер читает его только от `ST_TRUSTED_PROXIES` — фиксированного адреса edge
-  в своей подсети (`ST_EDGE_PROXY_IP`, по умолчанию 10.213.0.10), поэтому прямой клиент CN не подделает.
-  Токен с `cert_cn` принимается только с этим CN; в compose `ST_INGEST_REQUIRE_CLIENT_CERT=true`, и токены
-  без `cert_cn` не выпускаются и не принимаются.
-- **Заголовки.** `X-Forwarded-For` заменяется адресом клиента (не дописывается), `X-Request-Id` клиента
-  отбрасывается — его выдаёт сервер. Лог edge — JSON: путь без query, статус, время, CN, request id.
-- **Контейнер edge:** `nginx:1.27-alpine` под uid 101, read-only FS, `cap_drop: ALL`, `no-new-privileges`,
-  без entrypoint-скриптов образа. Приватный ключ CA в контейнер не монтируется.
-
-PKI для dev и небольших установок — `deploy/pki/pki.sh` (openssl, EC P-256):
+See what the extractor sees, locally and without a server (it never prints values):
 
 ```sh
-make pki HOSTS="st.example.com"     # CA на 10 лет, сертификат edge на 397 дней (localhost, 127.0.0.1, ::1 + HOSTS)
-make client-cert CN=ci-infra        # клиентский сертификат на 365 дней → deploy/pki/out/clients/ci-infra/
-make revoke-cert CN=ci-infra        # отзыв, новый CRL и reload edge
-deploy/pki/pki.sh crl && docker compose exec edge nginx -s reload   # продлить CRL
-deploy/pki/pki.sh list
+secrettrace extract .env k8s/secret.yaml
+secrettrace scan git . --locate --min-confidence medium
 ```
 
-- **CRL действует 90 дней** (`CRL_DAYS`). Когда он истекает, edge отклоняет **все** клиентские сертификаты:
-  поставьте `pki.sh crl` и reload в cron (например, раз в месяц).
-- Ключ CA лежит в `deploy/pki/out/ca/ca.key` (0600, каталог 0700). Храните его вне сервера или замените
-  этот CA своим: edge нужны только `ca.crt`, `crl.pem`, `fullchain.crt` и `server.key`.
-- Ключ edge (`server.key`) имеет права 0644, иначе nginx под uid 101 не прочитает его через bind mount;
-  на хосте его защищает каталог 0700, как и файлы в `deploy/secrets`.
-- CN: 1–64 символа `[A-Za-z0-9._-]`. Это же правило проверяют сервер и база.
+The full API is described in [`docs/openapi.json`](docs/openapi.json), and the server also serves it at
+`GET /api/v1/openapi.json`. Configuration is documented in [`.env.example`](.env.example).
 
-## Canary-токены (ловушки)
+## When to use what
 
-Приманка, которой никто не пользуется законно: если ею воспользовались, она утекла, неважно как (файл, сеть,
-скриншот, чат). Создаются в веб-интерфейсе («Ловушки») или через `POST /api/v1/canaries` `{name, kind,
-planted_at?, memo?}` (operator); значение показывается один раз.
-
-| Вид | Что выдаётся | Срабатывает |
+| Tool | Finds | Use it for |
 |---|---|---|
-| `url` | ссылка `<ST_CANARY_BASE_URL>/<слово>/<токен>` | кто-то открыл ссылку (браузер, curl, бот) |
-| `api_key` | адрес «сервиса» и ключ `ak_…` строками для `.env` | кто-то попробовал ключ на этом адресе: `Authorization: Bearer/Basic`, `X-Api-Key`, `?api_key=` |
+| gitleaks, TruffleHog | anything that looks like a secret | finding secrets you didn't know about |
+| **SecretTrace** | your registered secrets, with or without a format, plus canary hits | ownership, allowed locations, leaks after rotation, self-hosted |
+| Canarytokens | canary hits | quick standalone tripwires |
+| GitGuardian, HCP Vault Radar | both, as a commercial service | teams that are fine with SaaS |
 
-Ключ `api_key` к тому же регистрируется как секрет (`canary: <имя>`): если скан найдёт его в репозитории,
-логе или на диске, это обычное нарушение. Разложите приманки там, откуда утекают настоящие секреты:
-`.env` и конфиги на ноутбуках, wiki, CI-переменные, бэкапы.
+They work best together. For example, run gitleaks in pre-commit and SecretTrace in CI and on a schedule.
 
-- **Порт-ловушка** edge (`ST_CANARY_PORT`, по умолчанию 8081, только 127.0.0.1) — единственное, что стоит
-  открыть в интернет: `ST_CANARY_BIND=0.0.0.0` и `ST_CANARY_BASE_URL=https://cdn-assets.example.com` (адрес,
-  по которому его видно снаружи; лучше нейтральное имя). Он пропускает только запросы к ловушкам, остального
-  API через него не видно. Listener — HTTP; для HTTPS поставьте перед ним терминатор с публичным
-  сертификатом (частный CA атакующий не примет, запрос не дойдёт).
-- **Ответ** на любой запрос один и тот же — `404`, так что попавший не узнает, что его заметили.
-- **Срабатывание** — счётчик и последнее время, запись в «Ловушки» (IP, метод, путь с `{token}` вместо
-  токена, User-Agent), алерт `canary.triggered` (critical) и `warn` в логе сервера. Записей храним не больше
-  10 в минуту и 10 000 на ловушку, счётчик считает всё. **Уведомлений пока нет** (этап 10): следите за UI
-  или алертингом по логу (`canary token triggered`).
-- **Ключ** `ST_CANARY_KEY` (`deploy/secrets/canary_key`, создаёт `make secrets`). В БД лежит только HMAC
-  токенов: без ключа по дампу не понять, какие ключи — приманки. Потеря ключа делает все ловушки немыми.
-- Выключенная ловушка (`PATCH {enabled: false}`) запросы игнорирует.
+## Security model
 
-## Конфигурация
+**Stored:** secret names, owners, expiry dates, allow rules, keyed fingerprints, optional hints (such as a
+known prefix like `AKIA` and the length), locations (path, line, commit, blob) and an audit log.
 
-Все переменные описаны в [.env.example](.env.example). Любую чувствительную переменную `ST_X` можно
-передать как `ST_X_FILE` (путь к файлу, например Docker secret). Задать обе одновременно — ошибка.
+**Never stored or logged:** secret values, file contents, client-side digests, or the text of remote git
+errors.
 
-| Переменная | По умолчанию | Назначение |
-|---|---|---|
-| `ST_DATABASE_URL` | — | рантайм-подключение (роль `st_app`) |
-| `ST_MIGRATION_DATABASE_URL` | = `ST_DATABASE_URL` | подключение для `migrate` (роль `st_owner`) |
-| `ST_PEPPER_KEYS` | — | `1:<base64>,2:<base64>`, ключи ≥ 32 байт |
-| `ST_PEPPER_CURRENT` | максимальная версия | версия для новых отпечатков |
-| `ST_DATA_KEY` | — | base64 32 байт, AES-256-GCM для TOTP-seed'ов |
-| `ST_COOKIE_SECURE` | `true` | `Secure` и префикс `__Host-` у cookie; `false` только для разработки по HTTP |
-| `ST_SESSION_TTL_SECS` / `ST_SESSION_IDLE_SECS` | `43200` / `1800` | срок жизни сессии и тайм-аут бездействия |
-| `ST_TOTP_ISSUER` | `SecretTrace` | имя в приложении-аутентификаторе |
-| `ST_TRUSTED_PROXIES` | — | IP прокси, чьим `X-Forwarded-For` и `X-SecretTrace-Client-CN` доверять (в compose — адрес edge) |
-| `ST_CANARY_KEY` / `_FILE` | — | ключ HMAC для поиска ловушек (32 байта, base64); вместе с `ST_CANARY_BASE_URL` включает ловушки |
-| `ST_CANARY_BASE_URL` | — | публичный адрес порта-ловушки edge, на него указывают ссылки и `.env` ловушек |
-| `ST_INGEST_REQUIRE_CLIENT_CERT` | `false` | каждый API-токен должен быть привязан к сертификату (`cert_cn`) и приходить через mTLS; требует `ST_TRUSTED_PROXIES` |
-| `ST_LISTEN_ADDR` | `0.0.0.0:8080` | адрес API |
-| `ST_LOG_FORMAT` / `ST_LOG` | `json` / `info` | формат и фильтр логов |
-| `ST_DB_MAX_CONNECTIONS` | `10` | размер пула |
-| `ST_REQUEST_TIMEOUT_SECS` | `30` | таймаут запроса |
-| `ST_MAX_BODY_BYTES` | `1048576` | лимит тела запроса |
-| `ST_INGEST_DIGESTS_PER_HOUR` | `200000` | уникальных digest'ов в `/match` на API-токен в час |
-| `ST_WEB_DIR` | — | собранный интерфейс (`web/dist`); без него сервер отдаёт только API |
+The threat model, with trust boundaries and the attacks considered, is in
+[`docs/threat-model.md`](docs/threat-model.md). The architecture is in
+[`docs/architecture.md`](docs/architecture.md). Both are in Russian for now; English versions are planned.
 
-Воркер (`secrettrace-server worker`) читает `ST_DATABASE_URL`, `ST_PEPPER_KEYS`, `ST_LOG*` и свои переменные;
-`ST_DATA_KEY` ему не нужен.
+Found a vulnerability? Please report it privately, as described in [SECURITY.md](SECURITY.md).
 
-| Переменная | По умолчанию | Назначение |
-|---|---|---|
-| `ST_WORKER_DATA_DIR` | `/var/lib/secrettrace/worker` | bare-зеркала `repos/<source_id>.git` |
-| `ST_WORKER_CREDENTIALS_DIR` | `/run/git-credentials` | файлы, на которые ссылается `credential_ref` |
-| `ST_WORKER_SSH_KNOWN_HOSTS` | — | known_hosts для ssh-источников (без него они не сканируются) |
-| `ST_WORKER_ALLOWED_HOSTS` | — (обязательно) | разрешённые хосты через запятую |
-| `ST_WORKER_ALLOW_ANY_HOST` | `false` | разрешить пустой список хостов (небезопасно) |
-| `ST_WORKER_MAX_REPO_BYTES` | `2147483648` | лимит размера зеркала |
-| `ST_WORKER_TMP_DIR` | системный tmp | личные каталоги задач (копии credentials, `HOME` для git) |
-| `ST_WORKER_ID` | host-pid-случайное | имя владельца аренды задачи |
-| `ST_WORKER_CONCURRENCY` | `1` | задач одновременно (1–16) |
-| `ST_WORKER_SCAN_THREADS` | число CPU | потоков извлечения на задачу |
-| `ST_WORKER_JOB_TIMEOUT_SECS` | `1800` | fetch + скан одной задачи |
-| `ST_WORKER_LEASE_TIMEOUT_SECS` | `300` | задача без продления аренды столько времени возвращается в очередь |
-| `ST_WORKER_POLL_INTERVAL_SECS` | `5` | опрос очереди и расписаний |
-| `ST_WORKER_MAX_ATTEMPTS` | `3` | попыток с паузой 60 с, 120 с, … |
-| `ST_WORKER_MAX_BLOB_BYTES` | `16777216` | blob'ы больше пропускаются |
-| `ST_WORKER_ALLOW_LOCAL_REPOS` | `false` | `file://` и локальные пути (только для разработки и тестов) |
+## How this was built
 
-## Структура
+SecretTrace was built with AI coding agents (Claude Code) under my direction: agentic engineering, not
+autopilot. I set the goals, the architecture constraints and the threat model scope, and I reviewed the
+results. Agents wrote most of the code and tests. Separate adversarial agent passes attacked each stage, and
+their findings are fixed in the code and recorded in the threat model. The `Co-Authored-By` trailers in the
+git history are left as they are on purpose.
+
+I'm now reviewing the code line by line, starting with the fingerprint protocol, the nginx mTLS and CN
+handling, and the git worker. Review of those parts is especially welcome.
+
+## Status and limitations
+
+Done: registry, authentication with TOTP, audit log, extraction, fs and git scanning, ingest API, worker,
+CLI, web UI, TLS and mTLS edge, canary tokens, and an E2E test of the real Compose stack.
+
+Not done yet, or known gaps:
+- **No notification delivery yet** (email, Telegram, webhooks). Canary hits create alerts in the UI.
+  Violations are visible in the UI and through CLI exit codes.
+- **The web UI is in Russian only.** English is next on the list.
+- **Client-side digests use a fixed domain separator, not a per-install salt.** Treat digests as sensitive:
+  a digest of a weak password can be brute-forced. `extract` and `scan` print digests only with
+  `--show-digests`.
+- Most design docs are in Russian.
+- No tagged release, signed binaries or published images yet. Build from source.
+- No external security audit.
+
+## Development
+
+```sh
+make test        # unit and integration tests (starts a throwaway Postgres in Docker)
+make lint        # rustfmt --check and clippy pedantic with -D warnings
+make web-test    # web UI tests (vitest)
+make e2e         # builds the images and tests the real Compose stack from outside
+make help        # all targets
+```
 
 ```
-crates/st-core     нормализация, digest, hints, маскирование (общее для сервера и клиентов)
-crates/st-extract  извлечение кандидатов из текста и локальный digest (без сети и pepper)
-crates/st-source   источники: обход файловой системы и git-истории, пул потоков извлечения
-crates/st-server   API (axum), авторизация, воркер (очередь, планировщик, git fetch), админ-команды, аудит, pepper
-crates/st-cli      CLI `secrettrace`: `digest`, `extract`, `scan fs|git [--server]`, `register`
-web/               веб-интерфейс (React + TypeScript), порт нормализации и digest в web/src/crypto
-migrations/        SQL-миграции (встраиваются в бинарник)
-testdata/          общие тест-векторы digest (эталон посчитан независимой реализацией на Python)
-deploy/            init-скрипт Postgres, секреты (gitignored), nginx (edge), PKI-скрипт, примеры CI (deploy/ci)
-docs/              архитектура и ADR
+crates/st-core     normalization, digest, hints, masking (shared by server and clients)
+crates/st-extract  candidate extraction from text
+crates/st-source   filesystem and git sources, extraction thread pool
+crates/st-server   API (axum), auth, worker, admin commands, audit, pepper
+crates/st-cli      the `secrettrace` CLI
+web/               web UI (React + TypeScript), browser port of the digest code
+migrations/        SQL migrations (embedded in the binary)
+deploy/            Compose, nginx edge, PKI script, CI examples, E2E
+docs/              architecture, threat model, ADRs, OpenAPI
 ```
+
+Bug reports and questions are welcome in [Issues](https://github.com/MaxsudAmirxanov/secrettrace/issues).
+For larger changes, please open an issue first.
+
+## License
+
+[Apache License 2.0](LICENSE).

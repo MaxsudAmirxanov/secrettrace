@@ -7,3 +7,6 @@ deploy/secrets/*
 !deploy/secrets/.gitkeep
 deploy/worker/
 deploy/pki/out/
+
+# Private notes: article drafts, brand and research (not part of the product)
+/content/

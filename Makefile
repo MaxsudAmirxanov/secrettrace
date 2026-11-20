@@ -95,7 +95,8 @@ fmt: ## Format code
 	cargo fmt --all
 
 audit: ## Check dependencies for known vulnerabilities (needs cargo-audit)
-	cargo audit
+	# lockfile-only sqlx drivers, never built: see .github/workflows/ci.yml
+	cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
 	cd web && npm audit --omit=dev
 
 web-install: ## Install web UI dependencies (exact versions from package-lock.json)

@@ -1,0 +1,4 @@
+# Synthetic, truncated PEM blocks in tests (not real keys). Format: commit:file:rule:line.
+fb6ba4f80f9dc88c2aa843e2f764ed321ea6a74d:web/src/crypto/crypto.test.ts:private-key:60
+fb6ba4f80f9dc88c2aa843e2f764ed321ea6a74d:web/src/crypto/crypto.test.ts:private-key:75
+71492b1fd88d2d349af8a13f422b278fa841abff:crates/st-server/src/worker/credentials.rs:private-key:287

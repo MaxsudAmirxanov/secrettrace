@@ -78,7 +78,10 @@ jobs:
       - name: cargo audit
         run: |
           cargo install cargo-audit --locked
-          cargo audit
+          # Both are lockfile-only: sqlx 0.8 records the mysql/sqlite drivers in Cargo.lock,
+          # but they are never built (`cargo tree -i rsa` / `-i libsqlite3-sys` print nothing).
+          # RUSTSEC-2023-0071: rsa via sqlx-mysql. RUSTSEC-2026-0459: libsqlite3-sys via sqlx-sqlite.
+          cargo audit --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2026-0459
 
   secrets-scan:
     runs-on: ubuntu-latest

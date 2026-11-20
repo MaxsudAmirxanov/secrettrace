@@ -373,6 +373,34 @@ pub(crate) fn validate_uri(uri: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// The environment a scan is recorded under: a token bound to an environment gets it by
+/// default and cannot claim another (it could otherwise pick one an allow rule permits).
+fn bound_environment(principal: &TokenPrincipal, requested: Option<String>) -> Result<Option<String>, ApiError> {
+    match (&principal.environment, requested) {
+        (None, requested) => Ok(requested),
+        (Some(bound), None) => Ok(Some(bound.clone())),
+        (Some(bound), Some(e)) if e == *bound => Ok(Some(e)),
+        (Some(bound), Some(_)) => Err(ApiError::Denied(format!("this token may only report environment {bound:?}"))),
+    }
+}
+
+/// A token bound to a source type or URI pattern may only report matching sources.
+fn check_source_binding(principal: &TokenPrincipal, source_type: SourceType, uri: &str) -> Result<(), ApiError> {
+    if let Some(bound) = principal.source_type
+        && bound != source_type
+    {
+        return Err(ApiError::Denied(format!("this token may only report {} sources", source_type_str(bound))));
+    }
+    if let Some(pattern) = &principal.source_uri_pattern {
+        // Validated when the token was issued; an unparsable pattern matches nothing.
+        let allowed = crate::policy::Glob::parse(pattern).is_ok_and(|g| g.matches(uri));
+        if !allowed {
+            return Err(ApiError::Denied(format!("this token may only report sources matching {pattern:?}")));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_environment(env: Option<&str>) -> Result<Option<String>, ApiError> {
     match env {
         None => Ok(None),
@@ -635,7 +663,8 @@ pub async fn start(
     audit_event: AuditEvent,
 ) -> Result<ScanStarted, ApiError> {
     validate_uri(&req.source.uri)?;
-    let environment = validate_environment(req.environment.as_deref())?;
+    let environment = bound_environment(principal, validate_environment(req.environment.as_deref())?)?;
+    check_source_binding(principal, req.source.source_type, &req.source.uri)?;
     if !limiter.allow_scan_start(principal.id) {
         return Err(ApiError::TooManyRequests);
     }

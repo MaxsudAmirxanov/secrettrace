@@ -16,6 +16,13 @@ const CSRF_DOMAIN: &[u8] = b"secrettrace/csrf/v1\0";
 /// Known API token scopes. Tokens are for machines (agents, CI); humans use sessions.
 pub const API_SCOPES: &[&str] = &["ingest:profile", "ingest:match", "ingest:findings"];
 
+/// A client certificate CN a token can be bound to: 1-64 of `[A-Za-z0-9._-]` (what the
+/// PKI script issues; the database enforces the same).
+#[must_use]
+pub fn valid_cert_cn(cn: &str) -> bool {
+    (1..=64).contains(&cn.len()) && cn.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
 #[must_use]
 pub fn random_token() -> Zeroizing<String> {
     let mut bytes = Zeroizing::new([0u8; 32]);

@@ -198,6 +198,12 @@ export interface TokenInfo {
   kind: TokenKind;
   token_prefix: string;
   scopes: string[];
+  /** CN of the client certificate the token must arrive with (mTLS). */
+  cert_cn: string | null;
+  /** Bindings: only this source type / URI glob / environment may be reported. */
+  source_type: SourceType | null;
+  source_uri_pattern: string | null;
+  environment: string | null;
   created_at: string;
   expires_at: string | null;
   revoked_at: string | null;

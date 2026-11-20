@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { useCreateToken, useRevokeToken, useTokens } from "../api/hooks";
-import type { CreatedToken, TokenInfo, TokenKind } from "../api/types";
+import type { CreatedToken, SourceType, TokenInfo, TokenKind } from "../api/types";
 import { IconPlus, IconToken } from "../components/icons";
 import { ConfirmDialog, Modal } from "../components/Modal";
 import { DataTable } from "../components/Table";
@@ -9,7 +9,27 @@ import { Time } from "../components/Time";
 import { useToast } from "../components/Toast";
 import { Badge, Button, Checkbox, CopyButton, ErrorBanner, Field, Input, Mono, Notice, PageHeader, Select } from "../components/ui";
 import { formatDate } from "../lib/format";
-import { API_SCOPES, TOKEN_KIND_LABELS } from "../lib/labels";
+import { API_SCOPES, SOURCE_TYPE_LABELS, TOKEN_KIND_LABELS } from "../lib/labels";
+
+const NAME_RE = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** Optional binding fields: empty strings are not sent. */
+export function bindingFields(f: { certCn: string; sourceType: string; uriPattern: string; environment: string }) {
+  const out: { cert_cn?: string; source_type?: SourceType; source_uri_pattern?: string; environment?: string } = {};
+  if (f.certCn.trim()) out.cert_cn = f.certCn.trim();
+  if (f.sourceType) out.source_type = f.sourceType as SourceType;
+  if (f.uriPattern.trim()) out.source_uri_pattern = f.uriPattern.trim();
+  if (f.environment.trim()) out.environment = f.environment.trim();
+  return out;
+}
+
+/** Validation message for the binding fields, or null. */
+export function bindingError(f: { certCn: string; environment: string }): string | null {
+  if (f.certCn.trim() && !NAME_RE.test(f.certCn.trim())) return "CN: 1–64 символа из A–Z, a–z, 0–9, «.», «_», «-»";
+  if (f.environment.trim() && !NAME_RE.test(f.environment.trim()))
+    return "Окружение: 1–64 символа из A–Z, a–z, 0–9, «.», «_», «-»";
+  return null;
+}
 
 function tokenState(t: TokenInfo): { label: string; tone: "green" | "gray" | "amber" } {
   if (t.revoked_at) return { label: "Отозван", tone: "gray" };
@@ -23,14 +43,28 @@ function CreateModal({ open, onClose, onCreated }: { open: boolean; onClose: () 
   const [kind, setKind] = useState<TokenKind>("ci");
   const [scopes, setScopes] = useState<string[]>(API_SCOPES.map((s) => s.id));
   const [days, setDays] = useState("90");
+  const [certCn, setCertCn] = useState("");
+  const [sourceType, setSourceType] = useState("");
+  const [uriPattern, setUriPattern] = useState("");
+  const [environment, setEnvironment] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const [bindErr, setBindErr] = useState<string | null>(null);
 
   const submit = () => {
     if (!name.trim()) return setErr("Укажите имя");
     if (scopes.length === 0) return setErr("Выберите хотя бы одно право");
     setErr(null);
+    const b = bindingError({ certCn, environment });
+    setBindErr(b);
+    if (b) return;
     create.mutate(
-      { name: name.trim(), kind, scopes, expires_in_days: Number(days) },
+      {
+        name: name.trim(),
+        kind,
+        scopes,
+        expires_in_days: Number(days),
+        ...bindingFields({ certCn, sourceType, uriPattern, environment }),
+      },
       { onSuccess: (t) => onCreated(t) },
     );
   };
@@ -89,9 +123,61 @@ function CreateModal({ open, onClose, onCreated }: { open: boolean; onClose: () 
             />
           ))}
         </fieldset>
+        <fieldset className="space-y-3">
+          <legend className="label">Привязка</legend>
+          <p className="text-xs text-slate-500">
+            Токен с CN принимается только через mTLS-порт с клиентским сертификатом этого CN (выпуск:{" "}
+            <code>make client-cert CN=…</code>). Остальные поля ограничивают, о каких источниках и под каким окружением
+            токен может сообщать. Пустое поле — без ограничения.
+          </p>
+          <Field label="CN клиентского сертификата" error={bindErr}>
+            {(id, d) => (
+              <Input id={id} aria-describedby={d} value={certCn} onChange={(e) => setCertCn(e.target.value)} maxLength={64} placeholder="ci-infra" />
+            )}
+          </Field>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Тип источника">
+              {(id) => (
+                <Select id={id} value={sourceType} onChange={(e) => setSourceType(e.target.value)}>
+                  <option value="">Любой</option>
+                  {Object.entries(SOURCE_TYPE_LABELS).map(([k, v]) => (
+                    <option key={k} value={k}>
+                      {v}
+                    </option>
+                  ))}
+                </Select>
+              )}
+            </Field>
+            <Field label="Окружение">
+              {(id) => <Input id={id} value={environment} onChange={(e) => setEnvironment(e.target.value)} maxLength={64} placeholder="ci" />}
+            </Field>
+          </div>
+          <Field label="Шаблон URI источника">
+            {(id) => (
+              <Input id={id} value={uriPattern} onChange={(e) => setUriPattern(e.target.value)} maxLength={2048} placeholder="https://git.example.com/acme/**" />
+            )}
+          </Field>
+        </fieldset>
         {create.error && <ErrorBanner error={create.error} />}
       </div>
     </Modal>
+  );
+}
+
+function TokenBinding({ t }: { t: TokenInfo }) {
+  const parts = [
+    t.cert_cn && `CN ${t.cert_cn}`,
+    t.source_type && SOURCE_TYPE_LABELS[t.source_type],
+    t.source_uri_pattern,
+    t.environment && `env ${t.environment}`,
+  ].filter(Boolean) as string[];
+  if (parts.length === 0) return <span className="text-xs text-slate-500">нет</span>;
+  return (
+    <div className="flex max-w-xs flex-col gap-0.5 text-xs">
+      {parts.map((p) => (
+        <Mono key={p}>{p}</Mono>
+      ))}
+    </div>
   );
 }
 
@@ -127,6 +213,7 @@ export function TokensPage() {
           <tr>
             <th>Токен</th>
             <th>Права</th>
+            <th>Привязка</th>
             <th>Состояние</th>
             <th>Использован</th>
             <th>Истекает</th>
@@ -150,6 +237,9 @@ export function TokensPage() {
                     <Badge key={s}>{s}</Badge>
                   ))}
                 </div>
+              </td>
+              <td>
+                <TokenBinding t={t} />
               </td>
               <td>
                 <Badge tone={st.tone} dot>

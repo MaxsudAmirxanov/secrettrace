@@ -2,14 +2,19 @@
 # the locations its allow rules permit. Copy to .github/workflows/secrettrace.yml.
 #
 # Repository settings:
-#   Secrets   → SECRETTRACE_TOKEN   API token of kind `ci` with scopes ingest:profile,
-#                                   ingest:match, ingest:findings (web UI → API tokens)
-#   Variables → SECRETTRACE_SERVER  https://secrettrace.example.com
+#   Secrets   → SECRETTRACE_TOKEN        API token of kind `ci` with scopes ingest:profile,
+#                                        ingest:match, ingest:findings, bound to the client
+#                                        certificate below (cert_cn) and, ideally, to this
+#                                        repository (source_uri_pattern) and environment
+#               SECRETTRACE_CLIENT_CERT  contents of client.crt (make client-cert CN=…)
+#               SECRETTRACE_CLIENT_KEY   contents of client.key
+#   Variables → SECRETTRACE_SERVER       https://secrettrace.example.com:8443 (the mTLS port)
+#               SECRETTRACE_CA_CERT      contents of deploy/pki/out/ca/ca.crt (private CA only)
 # The CLI image is built from this repository: docker build --target cli -t <image> .
 #
 # Exit codes: 0 clean, 1 registered secrets outside allowed locations (see --fail-on),
-# 2 error (no token, server unreachable, unreadable files): the result is unknown.
-# Pull requests from forks get no secrets, so the job exits 2 there.
+# 2 error (no token, server unreachable, rejected certificate, unreadable files): the
+# result is unknown. Pull requests from forks get no secrets, so the job exits 2 there.
 name: secrettrace
 
 on:
@@ -31,12 +36,22 @@ jobs:
         env:
           SECRETTRACE_TOKEN: ${{ secrets.SECRETTRACE_TOKEN }}
           SECRETTRACE_SERVER: ${{ vars.SECRETTRACE_SERVER }}
+          CLIENT_CERT: ${{ secrets.SECRETTRACE_CLIENT_CERT }}
+          CLIENT_KEY: ${{ secrets.SECRETTRACE_CLIENT_KEY }}
+          CA_CERT: ${{ vars.SECRETTRACE_CA_CERT }}
           IMAGE: registry.example.com/secrettrace/cli:0.1.0
         # --source-uri: use the same URI as a server-side source of this repository (if any),
         # so the worker and CI update the same locations.
         run: |
+          # Private to the runner user; the container runs as the same user (--user).
+          umask 077; tls="$(mktemp -d)"; trap 'rm -rf "$tls"' EXIT
+          printf '%s\n' "$CLIENT_CERT" > "$tls/client.crt"
+          printf '%s\n' "$CLIENT_KEY" > "$tls/client.key"
+          printf '%s\n' "$CA_CERT" > "$tls/ca.crt"
           docker run --rm --user "$(id -u):$(id -g)" \
-            -v "$GITHUB_WORKSPACE:/repo:ro" -e SECRETTRACE_TOKEN \
+            -v "$GITHUB_WORKSPACE:/repo:ro" -v "$tls:/tls:ro" -e SECRETTRACE_TOKEN \
+            -e SECRETTRACE_CLIENT_CERT=/tls/client.crt -e SECRETTRACE_CLIENT_KEY=/tls/client.key \
+            -e SECRETTRACE_CA_CERT=/tls/ca.crt \
             "$IMAGE" scan git /repo \
               --server "$SECRETTRACE_SERVER" \
               --source-uri "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \

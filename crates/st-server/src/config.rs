@@ -78,7 +78,7 @@ impl Config {
         let pepper_current = env.parse_opt::<u16>("ST_PEPPER_CURRENT")?;
         let data_key = env.secret("ST_DATA_KEY")?.ok_or(ConfigError::Missing("ST_DATA_KEY"))?;
 
-        Ok(Self {
+        let config = Self {
             listen_addr: env.parse_or("ST_LISTEN_ADDR", SocketAddr::from(([0, 0, 0, 0], 8080)))?,
             database_url: env.secret("ST_DATABASE_URL")?.ok_or(ConfigError::Missing("ST_DATABASE_URL"))?,
             migration_database_url: env.secret("ST_MIGRATION_DATABASE_URL")?,
@@ -91,6 +91,7 @@ impl Config {
                 cookie_secure: env.parse_or("ST_COOKIE_SECURE", true)?,
                 totp_issuer: env.get("ST_TOTP_ISSUER").unwrap_or_else(|| "SecretTrace".into()),
                 trusted_proxies: env.ip_list("ST_TRUSTED_PROXIES")?,
+                require_client_cert: env.parse_or("ST_INGEST_REQUIRE_CLIENT_CERT", false)?,
             },
             log_format: env.log_format()?,
             request_timeout: Duration::from_secs(env.parse_or("ST_REQUEST_TIMEOUT_SECS", 30)?),
@@ -105,7 +106,16 @@ impl Config {
                 n => n,
             },
             web_dir: env.get("ST_WEB_DIR").filter(|d| !d.trim().is_empty()).map(std::path::PathBuf::from),
-        })
+        };
+        if config.auth.require_client_cert && config.auth.trusted_proxies.is_empty() {
+            // The certificate CN comes from the mTLS proxy; without a trusted proxy no
+            // request could ever pass.
+            return Err(ConfigError::Invalid {
+                var: "ST_INGEST_REQUIRE_CLIENT_CERT",
+                reason: "needs ST_TRUSTED_PROXIES (the mTLS proxy that verifies client certificates)".into(),
+            });
+        }
+        Ok(config)
     }
 }
 
@@ -334,6 +344,7 @@ mod tests {
         assert!(c.auth.cookie_secure, "cookies are Secure by default");
         assert_eq!(c.auth.session_idle, Duration::from_secs(1800));
         assert!(c.auth.trusted_proxies.is_empty());
+        assert!(!c.auth.require_client_cert);
         assert_eq!(c.ingest_digests_per_hour, 200_000);
     }
 
@@ -348,6 +359,12 @@ mod tests {
         let mut v = base();
         v.push(("ST_TRUSTED_PROXIES", "10.0.0.0/8"));
         assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_TRUSTED_PROXIES", .. }));
+
+        let mut v = base();
+        v.push(("ST_INGEST_REQUIRE_CLIENT_CERT", "true"));
+        assert!(matches!(load(&v).unwrap_err(), ConfigError::Invalid { var: "ST_INGEST_REQUIRE_CLIENT_CERT", .. }));
+        v.push(("ST_TRUSTED_PROXIES", "172.30.0.10"));
+        assert!(load(&v).unwrap().auth.require_client_cert);
 
         let mut v = base();
         v.retain(|(k, _)| *k != "ST_DATA_KEY");

@@ -34,6 +34,7 @@ pub fn state(pool: PgPool) -> AppState {
         cookie_secure: false,
         totp_issuer: "SecretTrace".into(),
         trusted_proxies: vec![],
+        require_client_cert: false,
     };
     AppState::new(pool, pepper, data_key, auth)
 }

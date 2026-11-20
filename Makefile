@@ -3,8 +3,10 @@ SECRETS_DIR := deploy/secrets
 WORKER_DIR := deploy/worker
 TEST_PG := secrettrace-test-pg
 TEST_DB_URL := postgres://postgres:test@127.0.0.1:54329/secrettrace
+PKI := deploy/pki/pki.sh
+PKI_OUT := deploy/pki/out
 
-.PHONY: help secrets up down logs build admin test test-unit test-db db-up db-down lint fmt audit web-install web-dev web-test web-build web-lint
+.PHONY: help secrets pki client-cert revoke-cert up down logs build admin test test-unit test-db db-up db-down lint fmt audit web-install web-dev web-test web-build web-lint
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -28,10 +30,23 @@ secrets: ## Generate local secret files (never overwrites existing ones)
 	@[ -e $(WORKER_DIR)/ssh_known_hosts ] || : > $(WORKER_DIR)/ssh_known_hosts; chmod 644 $(WORKER_DIR)/ssh_known_hosts
 	@echo "secrets ready in $(SECRETS_DIR)/ (back up pepper_keys and data_key: losing them invalidates fingerprints / TOTP enrollments)"
 
+pki: ## Create the edge CA and server certificate (never overwrites): make pki [HOSTS="st.example.com 10.0.0.5"]
+	@[ -f $(PKI_OUT)/ca/ca.crt ] || $(PKI) init
+	@[ -f $(PKI_OUT)/server/fullchain.crt ] || $(PKI) server $(HOSTS)
+
+client-cert: ## Issue a client certificate for mTLS ingest: make client-cert CN=ci-infra [DAYS=365]
+	@[ -n "$(CN)" ] || { echo "usage: make client-cert CN=<name> [DAYS=365]"; exit 1; }
+	$(PKI) client "$(CN)" $(DAYS)
+
+revoke-cert: ## Revoke a client certificate and reload the edge: make revoke-cert CN=ci-infra
+	@[ -n "$(CN)" ] || { echo "usage: make revoke-cert CN=<name>"; exit 1; }
+	$(PKI) revoke "$(CN)"
+	-docker compose exec edge nginx -s reload
+
 build: ## Build release binaries
 	cargo build --release --locked
 
-up: secrets ## Start the stack (postgres, migrate, server, worker)
+up: secrets pki ## Start the stack (postgres, migrate, server, worker, TLS edge)
 	docker compose up -d --build
 
 down: ## Stop the stack (data volume is kept)

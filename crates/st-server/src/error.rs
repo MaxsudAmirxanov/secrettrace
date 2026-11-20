@@ -16,6 +16,10 @@ pub enum ApiError {
     Unauthorized,
     #[error("forbidden")]
     Forbidden,
+    /// 403 with an explanation the caller may see (e.g. a token binding that does not allow
+    /// this request). Never put secrets or other users' data in it.
+    #[error("forbidden: {0}")]
+    Denied(String),
     #[error("not found")]
     NotFound,
     #[error("conflict: {0}")]
@@ -56,7 +60,7 @@ impl ApiError {
         match self {
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
-            Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Forbidden | Self::Denied(_) => StatusCode::FORBIDDEN,
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Unprocessable(_) => StatusCode::UNPROCESSABLE_ENTITY,
@@ -72,7 +76,7 @@ impl ApiError {
         match self {
             Self::BadRequest(_) => ("urn:secrettrace:problem:bad-request", "Bad request"),
             Self::Unauthorized => ("urn:secrettrace:problem:unauthorized", "Authentication required"),
-            Self::Forbidden => ("urn:secrettrace:problem:forbidden", "Forbidden"),
+            Self::Forbidden | Self::Denied(_) => ("urn:secrettrace:problem:forbidden", "Forbidden"),
             Self::NotFound => ("urn:secrettrace:problem:not-found", "Not found"),
             Self::Conflict(_) => ("urn:secrettrace:problem:conflict", "Conflict"),
             Self::Unprocessable(_) => ("urn:secrettrace:problem:validation", "Validation failed"),
@@ -90,7 +94,7 @@ impl ApiError {
 
     fn detail(&self) -> Option<String> {
         match self {
-            Self::BadRequest(d) | Self::Conflict(d) | Self::Unprocessable(d) => Some(d.clone()),
+            Self::BadRequest(d) | Self::Conflict(d) | Self::Unprocessable(d) | Self::Denied(d) => Some(d.clone()),
             _ => None,
         }
     }

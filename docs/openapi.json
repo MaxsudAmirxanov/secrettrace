@@ -2712,6 +2712,22 @@
           "expires_in_days"
         ],
         "properties": {
+          "cert_cn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "CN of the client certificate the token must arrive with (through the mTLS\nendpoint), 1-64 of `[A-Za-z0-9._-]`. Required when the server enforces client\ncertificates.",
+            "example": "ci-infra"
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Scans are recorded under this environment; the token cannot claim another.",
+            "example": "ci"
+          },
           "expires_in_days": {
             "type": "integer",
             "format": "int64",
@@ -2735,6 +2751,25 @@
               "ingest:match",
               "ingest:findings"
             ]
+          },
+          "source_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceType",
+                "description": "Only sources of this type may be reported."
+              }
+            ]
+          },
+          "source_uri_pattern": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only source URIs matching this glob may be reported (`*` stops at `/`, `**` does not).",
+            "example": "https://git.example.com/acme/**"
           }
         },
         "additionalProperties": false
@@ -4782,9 +4817,21 @@
           "created_at"
         ],
         "properties": {
+          "cert_cn": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "environment": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "expires_at": {
             "type": [
@@ -4822,6 +4869,22 @@
             "items": {
               "type": "string"
             }
+          },
+          "source_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SourceType"
+              }
+            ]
+          },
+          "source_uri_pattern": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "token_prefix": {
             "type": "string"

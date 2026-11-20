@@ -30,9 +30,9 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 ## 2. Компоненты
 
 ```
-            ┌──────────── nginx (edge, этап 13) ───┐
- браузер ──▶│ :443  TLS → web (static) + /api      │
- агент/CI ─▶│ :8443 mTLS → /api/v1/ingest          │
+            ┌──────────── nginx (edge) ────────────┐
+ браузер ──▶│ :443  TLS → web (static) + /api      │  ingest на :443 — 403
+ агент/CI ─▶│ :8443 mTLS → /api/v1/ingest          │  CN → X-SecretTrace-Client-CN
             └───────────────┬──────────────────────┘
                             ▼
       secrettrace-server serve  ◀── Postgres 17 ──▶  secrettrace-server worker
@@ -82,7 +82,8 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   Введённое имя несуществующего пользователя в аудит не пишется: туда часто по ошибке вводят пароль.
 - **Роли:** `viewer < operator < admin`, проверка `CurrentUser::require(role)` в каждом обработчике.
 - **API-токены** (`stk_<id>_<секрет>`) только для машин: scopes `ingest:*`, обязательный срок жизни
-  (до 365 дней), хранится SHA-256, отзыв действует сразу. Привязка к CN клиентского сертификата mTLS — этап 13.
+  (до 365 дней), хранится SHA-256, отзыв действует сразу. Необязательные привязки (§ 8a): CN клиентского
+  сертификата, тип и glob URI источника, окружение.
 - **IP клиента** берётся из адреса соединения; `X-Forwarded-For` учитывается только от `ST_TRUSTED_PROXIES`.
 
 ## 5. Реестр
@@ -179,8 +180,9 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   значение. `locator` берётся от версии из текущего состояния. Успешный полный скан снимает флаг с мест
   источника, которых он не видел (`no_longer_present`), но только с тех, что раньше сообщал тот же токен
   и что старше начала скана (`last_seen < started_at`). Скан старше 24 часов можно лишь завершить как `failed`.
-- **Известное ограничение:** токен сам выбирает `environment` скана и может подогнать его под allow-правило.
-  Закрывается привязкой токена к источнику на этапе 13.
+- **Окружение и источник** без привязок выбирает сам токен и может подогнать их под allow-правило; привязки
+  токена (§ 8a) это закрывают: при `environment` у токена другое окружение даёт 403, без поля в запросе
+  подставляется окружение токена; источник проверяется по типу и glob URI.
 - **Allow-правила** (`policy::allow`): все заданные поля правила должны совпасть, побеждает правило
   с меньшим id. При замене правил `policy::reevaluate` пересчитывает места секрета в той же транзакции:
   удаление старых правил обнуляет `allow_rule_id` через `ON DELETE SET NULL`, но `is_allowed` пересчитать
@@ -197,6 +199,33 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   `crates/st-cli/tests/server.rs`, который запускает бинарник против настоящего сервера.
 - **`register`** — операция человека: пароль и TOTP с терминала, одна сессия на один `POST /secrets`,
   затем logout; значение хешируется и затирается до входа. API-токены к реестру доступа не имеют.
+
+## 8a. Edge: TLS, mTLS и привязка токенов
+
+- **nginx** — единственная опубликованная точка: `:443` (TLS, UI и API, ingest закрыт 403) и `:8443` (mTLS,
+  только ingest и `/healthz`, `ssl_verify_client on`, CA SecretTrace, CRL). Сервер в сети `edge` без
+  опубликованного порта. Контейнер — uid 101, read-only, `cap_drop: ALL`, без entrypoint-скриптов образа;
+  в него монтируются отдельными файлами только `fullchain.crt`, `server.key`, `ca.crt`, `crl.pem`.
+- **CN** проверенного сертификата nginx кладёт в `X-SecretTrace-Client-CN` (`map` по `$ssl_client_s_dn`),
+  на `:443` заголовок очищается; `X-Forwarded-For` заменяется `$remote_addr`, клиентский `X-Request-Id`
+  отбрасывается. Каждая location с `proxy_set_header` подключает общий `proxy_headers.conf`: иначе nginx
+  молча теряет унаследованные заголовки.
+- **Доверие на сервере** только по адресу TCP-пира из `ST_TRUSTED_PROXIES`: у edge фиксированный адрес
+  в фиксированной подсети compose. Повторённый или некорректный заголовок считается отсутствием сертификата.
+- **Проверка токена** — одним `UPDATE … RETURNING`: `(cert_cn IS NULL OR cert_cn = $cn) AND
+  (cert_cn IS NOT NULL OR NOT $require)`, поэтому отказ не обновляет `last_used_at`. Клиент получает тот же 401,
+  что и при неверном токене; причина (нет сертификата, другой CN, требуется привязка) — только в лог сервера.
+  `ST_INGEST_REQUIRE_CLIENT_CERT=true` без `ST_TRUSTED_PROXIES` — ошибка конфигурации; в этом режиме
+  токены без `cert_cn` не выпускаются.
+- **Привязки источника и окружения** проверяются при старте скана (`ingest::start`), остальные вызовы
+  работают со сканом этого же токена. Нарушение — 403 (`ApiError::Denied`) с объяснением: оно касается только
+  самого токена и ничего не раскрывает.
+- **PKI** (`deploy/pki/pki.sh`): EC P-256, CA с `pathlen:0`, `openssl ca` с `index.txt` (отзыв, CRL на 90 дней),
+  сертификаты edge (`serverAuth`, SAN) и клиентов (`clientAuth`, CN `[A-Za-z0-9._-]{1,64}`, тот же формат
+  проверяют сервер и CHECK в БД). Истёкший CRL блокирует всех клиентов — его продлевают по расписанию.
+- **CLI**: `--client-cert`/`--client-key` (rustls), только с `https://`.
+- **Ограничения:** ключ CA лежит рядом с установкой (для продакшена — внешний CA); OCSP нет; отзыв
+  сертификата действует после reload edge; привязку CN нельзя изменить у выпущенного токена — выпускается новый.
 
 ## 9. Воркер
 
@@ -297,7 +326,7 @@ SPA в `web/`, собирается в статические файлы; сер
 forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupported-media-type|unavailable|internal}`. Корреляция — заголовок `x-request-id`.
 
 ## 12. Схема БД
-См. `migrations/0001_core.sql`, `0002_auth.sql`, `0003_ingest.sql` и `0004_worker.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
+См. `migrations/0001_core.sql`, `0002_auth.sql`, `0003_ingest.sql`, `0004_worker.sql` и `0005_edge.sql`: `users`, `sessions`, `api_tokens`, `secrets`, `secret_allow_rules`, `sources`,
 `scan_jobs`, `locations`, `alerts`, `notification_channels`, `alert_deliveries` (outbox), `audit_log`.
 
 ## 13. План MVP
@@ -317,7 +346,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |
 | 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | ✅ |
 | 12 | Web UI (React + TS): логин и MFA, обзор, находки, секреты, источники, сканы, токены, пользователи, аудит | ✅ |
-| 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | |
+| 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | ✅ |
 | 14 | E2E в compose, threat model | |
 
 Этапы после MVP: коллекторы (Vault audit, CloudTrail, auth.log, SDK) и граф (Cytoscape.js); canary-токены

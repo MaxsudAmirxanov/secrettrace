@@ -15,6 +15,9 @@ use crate::auth::tokens::{self, API_SCOPES};
 use crate::auth::{CurrentUser, RequestMeta, Role};
 use crate::error::{ApiError, ApiResult, Problem};
 use crate::extract::{ApiJson, ApiPath};
+use crate::ingest::validate_environment;
+use crate::model::SourceType;
+use crate::policy::Glob;
 
 const MAX_TTL_DAYS: i64 = 365;
 
@@ -46,6 +49,23 @@ pub struct CreateTokenRequest {
     /// Days until expiry (1..=365). Tokens always expire.
     #[schema(minimum = 1, maximum = 365)]
     expires_in_days: i64,
+    /// CN of the client certificate the token must arrive with (through the mTLS
+    /// endpoint), 1-64 of `[A-Za-z0-9._-]`. Required when the server enforces client
+    /// certificates.
+    #[serde(default)]
+    #[schema(example = "ci-infra")]
+    cert_cn: Option<String>,
+    /// Only sources of this type may be reported.
+    #[serde(default)]
+    source_type: Option<SourceType>,
+    /// Only source URIs matching this glob may be reported (`*` stops at `/`, `**` does not).
+    #[serde(default)]
+    #[schema(example = "https://git.example.com/acme/**")]
+    source_uri_pattern: Option<String>,
+    /// Scans are recorded under this environment; the token cannot claim another.
+    #[serde(default)]
+    #[schema(example = "ci")]
+    environment: Option<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow, ToSchema)]
@@ -55,6 +75,10 @@ pub struct TokenInfo {
     pub kind: String,
     pub token_prefix: String,
     pub scopes: Vec<String>,
+    pub cert_cn: Option<String>,
+    pub source_type: Option<SourceType>,
+    pub source_uri_pattern: Option<String>,
+    pub environment: Option<String>,
     pub created_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
     pub revoked_at: Option<DateTime<Utc>>,
@@ -69,7 +93,8 @@ pub struct CreatedToken {
     pub info: TokenInfo,
 }
 
-const TOKEN_COLUMNS: &str = "id, name, kind, token_prefix, scopes, created_at, expires_at, revoked_at, last_used_at";
+const TOKEN_COLUMNS: &str = "id, name, kind, token_prefix, scopes, cert_cn, source_type, source_uri_pattern, environment, \
+                             created_at, expires_at, revoked_at, last_used_at";
 
 /// List API tokens (never includes token values).
 #[utoipa::path(get, path = "/api/v1/api-tokens", tag = "api-tokens",
@@ -106,6 +131,25 @@ pub async fn create(
     if !(1..=MAX_TTL_DAYS).contains(&req.expires_in_days) {
         return Err(ApiError::Unprocessable(format!("expires_in_days must be 1..={MAX_TTL_DAYS}")));
     }
+    let cert_cn = req.cert_cn.as_deref().map(str::trim).filter(|c| !c.is_empty());
+    if let Some(cn) = cert_cn
+        && !tokens::valid_cert_cn(cn)
+    {
+        return Err(ApiError::Unprocessable("cert_cn must be 1-64 chars of [A-Za-z0-9._-]".into()));
+    }
+    if cert_cn.is_none() && state.auth.require_client_cert {
+        return Err(ApiError::Unprocessable(
+            "this server requires API tokens bound to a client certificate: set cert_cn".into(),
+        ));
+    }
+    let uri_pattern = req.source_uri_pattern.as_deref().map(str::trim).filter(|p| !p.is_empty());
+    if let Some(p) = uri_pattern {
+        if p.len() > 2048 {
+            return Err(ApiError::Unprocessable("source_uri_pattern must be at most 2048 bytes".into()));
+        }
+        Glob::parse(p).map_err(|e| ApiError::Unprocessable(format!("source_uri_pattern: {e}")))?;
+    }
+    let environment = validate_environment(req.environment.as_deref().map(str::trim).filter(|e| !e.is_empty()))?;
     let mut scopes = req.scopes.clone();
     scopes.sort();
     scopes.dedup();
@@ -115,8 +159,9 @@ pub async fn create(
 
     let mut tx = state.db.begin().await?;
     let info: TokenInfo = sqlx::query_as(&format!(
-        "INSERT INTO api_tokens (name, kind, token_hash, token_prefix, scopes, created_by, expires_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING {TOKEN_COLUMNS}"
+        "INSERT INTO api_tokens (name, kind, token_hash, token_prefix, scopes, created_by, expires_at,
+                                 cert_cn, source_type, source_uri_pattern, environment)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING {TOKEN_COLUMNS}"
     ))
     .bind(name)
     .bind(req.kind.as_str())
@@ -125,10 +170,16 @@ pub async fn create(
     .bind(&scopes)
     .bind(user.id)
     .bind(expires_at)
+    .bind(cert_cn)
+    .bind(req.source_type)
+    .bind(uri_pattern)
+    .bind(&environment)
     .fetch_one(&mut *tx)
     .await?;
     let ev = meta.user_event(user.id, "api_token.create").target("api_token", info.id.to_string()).details(json!({
         "name": name, "prefix": new.prefix, "kind": req.kind.as_str(), "scopes": scopes,
+        "cert_cn": cert_cn, "source_type": req.source_type, "source_uri_pattern": uri_pattern,
+        "environment": environment,
     }));
     audit::record(&mut tx, &ev).await?;
     tx.commit().await?;

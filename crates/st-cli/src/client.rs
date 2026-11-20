@@ -20,7 +20,7 @@ use clap::Args;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use ureq::http::{Response, StatusCode, Uri};
-use ureq::tls::{Certificate, RootCerts, TlsConfig};
+use ureq::tls::{Certificate, ClientCert, PrivateKey, RootCerts, TlsConfig};
 use ureq::{Agent, Body};
 use zeroize::Zeroizing;
 
@@ -38,6 +38,12 @@ pub struct ServerArgs {
     /// PEM file with the CA certificate(s) to trust instead of the built-in web roots.
     #[arg(long, env = "SECRETTRACE_CA_CERT", value_name = "FILE")]
     pub ca_cert: Option<PathBuf>,
+    /// PEM client certificate (chain) for the mTLS ingest endpoint (`https://host:8443`).
+    #[arg(long, env = "SECRETTRACE_CLIENT_CERT", value_name = "FILE", requires = "client_key")]
+    pub client_cert: Option<PathBuf>,
+    /// PEM private key of --client-cert.
+    #[arg(long, env = "SECRETTRACE_CLIENT_KEY", value_name = "FILE", requires = "client_cert")]
+    pub client_key: Option<PathBuf>,
     /// Allow plain `http://` to a non-loopback host (tokens and digests travel unencrypted).
     #[arg(long)]
     pub allow_http: bool,
@@ -94,29 +100,29 @@ impl Client {
         let raw = args.server.as_deref().context("no server given: pass --server URL")?;
         let base = base_url(raw, args.allow_http)?;
         let roots = match &args.ca_cert {
-            Some(path) => {
-                let pem = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-                let certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(&pem)
-                    .filter_map(|item| match item {
-                        Ok(ureq::tls::PemItem::Certificate(c)) => Some(Ok(c)),
-                        Ok(_) => None,
-                        Err(e) => Some(Err(e)),
-                    })
-                    .collect::<Result<_, _>>()
-                    .with_context(|| format!("{}: invalid PEM", path.display()))?;
-                if certs.is_empty() {
-                    bail!("{}: no certificates found", path.display());
-                }
-                RootCerts::Specific(Arc::new(certs))
-            }
+            Some(path) => RootCerts::Specific(Arc::new(read_certs(path)?)),
             None => RootCerts::WebPki,
+        };
+        let client_cert = match (&args.client_cert, &args.client_key) {
+            (Some(cert), Some(key)) => {
+                if !base.starts_with("https://") {
+                    bail!("--client-cert needs an https:// server");
+                }
+                let chain = read_certs(cert)?;
+                let key_pem =
+                    Zeroizing::new(std::fs::read(key).with_context(|| format!("cannot read {}", key.display()))?);
+                let key =
+                    PrivateKey::from_pem(&key_pem).with_context(|| format!("{}: no PEM private key", key.display()))?;
+                Some(ClientCert::new_with_certs(&chain, key))
+            }
+            _ => None,
         };
         let agent = Agent::config_builder()
             .http_status_as_error(false)
             .max_redirects(0)
             .timeout_global(Some(Duration::from_secs(args.timeout.max(1))))
             .user_agent(concat!("secrettrace/", env!("CARGO_PKG_VERSION")))
-            .tls_config(TlsConfig::builder().root_certs(roots).build())
+            .tls_config(TlsConfig::builder().root_certs(roots).client_cert(client_cert).build())
             .build()
             .new_agent();
         Ok(Self { agent, base })
@@ -194,6 +200,23 @@ impl Client {
             std::thread::sleep(wait);
         }
     }
+}
+
+/// Every certificate in a PEM file.
+fn read_certs(path: &std::path::Path) -> anyhow::Result<Vec<Certificate<'static>>> {
+    let pem = std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let certs: Vec<Certificate<'static>> = ureq::tls::parse_pem(&pem)
+        .filter_map(|item| match item {
+            Ok(ureq::tls::PemItem::Certificate(c)) => Some(Ok(c)),
+            Ok(_) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<Result<_, _>>()
+        .with_context(|| format!("{}: invalid PEM", path.display()))?;
+    if certs.is_empty() {
+        bail!("{}: no certificates found", path.display());
+    }
+    Ok(certs)
 }
 
 /// Failures where the request most likely never reached the application.

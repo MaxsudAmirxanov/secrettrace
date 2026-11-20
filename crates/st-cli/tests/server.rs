@@ -61,6 +61,7 @@ impl Server {
             cookie_secure: false,
             totp_issuer: "SecretTrace".into(),
             trusted_proxies: vec![],
+            require_client_cert: false,
         };
         let state = AppState::new(pool.clone(), pepper(), data_key, auth);
         let limits = HttpLimits { request_timeout: Duration::from_secs(30), max_body_bytes: 1024 * 1024 };

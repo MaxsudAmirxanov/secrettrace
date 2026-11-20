@@ -218,6 +218,7 @@ mod tests {
             cookie_secure: false,
             totp_issuer: "SecretTrace".into(),
             trusted_proxies: vec![],
+            require_client_cert: false,
         };
         router(
             AppState::new(db, pepper, data_key, auth),

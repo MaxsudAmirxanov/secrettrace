@@ -2,6 +2,7 @@
 
 use std::net::{IpAddr, SocketAddr};
 
+use axum::extract::connect_info::MockConnectInfo;
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{Method, header};
@@ -12,8 +13,36 @@ use super::{Role, tokens};
 use crate::app::AppState;
 use crate::audit::{ActorType, AuditEvent};
 use crate::error::ApiError;
+use crate::model::SourceType;
 
 const MAX_USER_AGENT: usize = 256;
+
+/// Address of the TCP peer (`MockConnectInfo` in tests).
+fn peer_ip(parts: &Parts) -> Option<IpAddr> {
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip())
+        .or_else(|| parts.extensions.get::<MockConnectInfo<SocketAddr>>().map(|c| c.0.ip()))
+}
+
+/// Header the mTLS proxy sets to the CN of the client certificate it verified. Only read
+/// from `trusted_proxies`; the proxy's other listeners clear it.
+pub const CLIENT_CN_HEADER: &str = "x-secrettrace-client-cn";
+
+/// The verified client-certificate CN, if the request came through a trusted proxy that
+/// sent one. Anything else (direct connections, malformed values) is "no certificate".
+fn client_cn(parts: &Parts, trusted_proxies: &[IpAddr]) -> Option<String> {
+    let peer = peer_ip(parts)?;
+    if !trusted_proxies.contains(&peer) {
+        return None;
+    }
+    let mut values = parts.headers.get_all(CLIENT_CN_HEADER).iter();
+    let (first, second) = (values.next(), values.next());
+    // Exactly one value: a repeated header means something upstream is confused.
+    let cn = first.filter(|_| second.is_none())?.to_str().ok()?;
+    tokens::valid_cert_cn(cn).then(|| cn.to_owned())
+}
 
 /// Client address, request id and user agent for auditing.
 #[derive(Debug, Clone)]
@@ -25,8 +54,7 @@ pub struct RequestMeta {
 
 impl RequestMeta {
     fn from_parts(parts: &Parts, trusted_proxies: &[IpAddr]) -> Self {
-        let peer = parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip());
-        let ip = match peer {
+        let ip = match peer_ip(parts) {
             // Behind a trusted proxy: the right-most X-Forwarded-For entry is the one
             // the proxy itself appended, i.e. the address it saw.
             Some(p) if trusted_proxies.contains(&p) => parts
@@ -144,6 +172,11 @@ pub struct TokenPrincipal {
     pub token_prefix: String,
     pub scopes: Vec<String>,
     pub cert_cn: Option<String>,
+    /// Bindings: the token may only report this source type, URIs matching this glob,
+    /// and only under this environment.
+    pub source_type: Option<SourceType>,
+    pub source_uri_pattern: Option<String>,
+    pub environment: Option<String>,
 }
 
 impl TokenPrincipal {
@@ -165,15 +198,40 @@ impl FromRequestParts<AppState> for TokenPrincipal {
             .filter(|t| tokens::looks_like_api_token(t))
             .ok_or(ApiError::Unauthorized)?;
 
-        let principal: TokenPrincipal = sqlx::query_as(
+        let hash = tokens::hash_token(token);
+        let cn = client_cn(parts, &state.auth.trusted_proxies);
+        // A bound token needs its certificate; with `require_client_cert` every token must
+        // be bound. Checked in the same statement, so a refused request is not "last use".
+        let principal: Option<TokenPrincipal> = sqlx::query_as(
             "UPDATE api_tokens SET last_used_at = now()
              WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())
-             RETURNING id, name, kind, token_prefix, scopes, cert_cn",
+               AND (cert_cn IS NULL OR cert_cn = $2) AND (cert_cn IS NOT NULL OR NOT $3)
+             RETURNING id, name, kind, token_prefix, scopes, cert_cn, source_type, source_uri_pattern, environment",
         )
-        .bind(tokens::hash_token(token).as_slice())
+        .bind(hash.as_slice())
+        .bind(cn.as_deref())
+        .bind(state.auth.require_client_cert)
         .fetch_optional(&state.db)
-        .await?
-        .ok_or(ApiError::Unauthorized)?;
-        Ok(principal)
+        .await?;
+        if let Some(p) = principal {
+            return Ok(p);
+        }
+        // Refused: say why in the server log (never to the client), for operators chasing a 401.
+        let live: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT token_prefix, cert_cn FROM api_tokens
+             WHERE token_hash = $1 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())",
+        )
+        .bind(hash.as_slice())
+        .fetch_optional(&state.db)
+        .await?;
+        if let Some((prefix, bound)) = live {
+            let reason = match (&bound, &cn) {
+                (None, _) => "the server requires tokens bound to a client certificate",
+                (Some(_), None) => "no verified client certificate (use the mTLS endpoint)",
+                (Some(_), Some(_)) => "client certificate CN does not match the token",
+            };
+            tracing::warn!(token = %prefix, presented_cn = cn.as_deref().unwrap_or("-"), reason, "API token refused");
+        }
+        Err(ApiError::Unauthorized)
     }
 }

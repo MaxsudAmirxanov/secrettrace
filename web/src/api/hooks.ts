@@ -22,6 +22,7 @@ import type {
   SecretUpdate,
   Source,
   SourceCreate,
+  SourceType,
   SourceUpdate,
   TokenInfo,
   User,
@@ -147,7 +148,16 @@ export function useCancelScan() {
 export function useCreateToken() {
   const inv = useInvalidate();
   return useMutation({
-    mutationFn: (body: { name: string; kind: TokenKind; scopes: string[]; expires_in_days: number }) =>
+    mutationFn: (body: {
+      name: string;
+      kind: TokenKind;
+      scopes: string[];
+      expires_in_days: number;
+      cert_cn?: string;
+      source_type?: SourceType;
+      source_uri_pattern?: string;
+      environment?: string;
+    }) =>
       post<CreatedToken>("/api-tokens", body),
     onSuccess: () => inv("tokens"),
   });

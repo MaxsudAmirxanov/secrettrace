@@ -19,7 +19,7 @@ pub mod totp;
 use std::net::IpAddr;
 use std::time::Duration;
 
-pub use extract::{CurrentUser, RequestMeta, SessionAuth, TokenPrincipal};
+pub use extract::{CLIENT_CN_HEADER, CurrentUser, RequestMeta, SessionAuth, TokenPrincipal};
 pub use role::Role;
 
 /// Failed password/TOTP attempts before the account is locked.
@@ -34,8 +34,11 @@ pub struct AuthSettings {
     pub session_idle: Duration,
     pub cookie_secure: bool,
     pub totp_issuer: String,
-    /// Reverse proxies whose `X-Forwarded-For` is trusted.
+    /// Reverse proxies whose `X-Forwarded-For` and client-certificate header are trusted.
     pub trusted_proxies: Vec<IpAddr>,
+    /// Every API token must be bound to a client certificate (`cert_cn`) and arrive through
+    /// the mTLS proxy with it. Bound tokens are checked either way.
+    pub require_client_cert: bool,
 }
 
 impl AuthSettings {

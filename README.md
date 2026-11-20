@@ -4,10 +4,10 @@
 секрет, кто им пользуется и не утёк ли он туда, где его быть не должно. Хранятся только HMAC-отпечатки,
 не значения.
 
-> Статус: этапы 0–9, 11 и 12 из [docs/architecture.md](docs/architecture.md): ядро отпечатков, схема БД,
+> Статус: этапы 0–9 и 11–13 из [docs/architecture.md](docs/architecture.md): ядро отпечатков, схема БД,
 > журнал аудита, авторизация (пароль + обязательный TOTP), реестр секретов, извлечение кандидатов,
-> сканирование git и файлов, приём данных от CI, серверный воркер, CLI для CI и веб-интерфейс.
-> Алерты (10), TLS/mTLS (13) и E2E (14) — следующие этапы.
+> сканирование git и файлов, приём данных от CI, серверный воркер, CLI для CI, веб-интерфейс и TLS-edge
+> с mTLS для агентов. Алерты (10) и E2E (14) — следующие этапы.
 
 ## Требования
 
@@ -17,11 +17,17 @@
 
 ```sh
 make secrets      # создаёт deploy/secrets/* (пароли БД, pepper); в git не попадают
-make up           # postgres → migrate → server (API + веб-интерфейс) + worker
-curl -s localhost:8080/healthz   # {"status":"ok"}
-curl -s localhost:8080/readyz    # {"status":"ready"}
-make admin NAME=alice            # первый администратор, затем http://localhost:8080
+make pki          # CA и сертификат edge в deploy/pki/out/ (HOSTS="st.example.com" — доп. имена)
+make up           # postgres → migrate → server + worker + edge (nginx); make up делает secrets и pki сам
+curl -s --cacert deploy/pki/out/ca/ca.crt https://localhost/healthz   # {"status":"ok"}
+make admin NAME=alice            # первый администратор, затем https://localhost
 ```
+
+Наружу публикуется только edge: `https://<host>/` (веб-интерфейс и API) и `https://<host>:8443/` (ingest
+по mTLS). По умолчанию порты слушают 127.0.0.1; `ST_EDGE_BIND=0.0.0.0` открывает их в сети. Браузер
+не знает частный CA: импортируйте `deploy/pki/out/ca/ca.crt` или выпустите сертификат edge у своего CA
+(см. [TLS и mTLS](#tls-и-mtls-edge)). При обновлении со стека без edge сначала выполните `docker compose down`:
+у сети `edge` теперь фиксированная подсеть, и compose пересоздаёт её.
 
 **Сделайте резервную копию `deploy/secrets/pepper_keys` и `deploy/secrets/data_key`.** Без pepper отпечатки
 нельзя ни проверить, ни пересчитать: все секреты придётся регистрировать заново. Без data key пропадут
@@ -58,9 +64,19 @@ docker compose run --rm --no-deps server unlock-user --username alice   # сня
 ```
 
 **API-токены** для агентов и CI создаёт администратор: `POST /api/v1/api-tokens`
-`{name, kind: agent|ci|automation, scopes: [ingest:profile|ingest:match|ingest:findings], expires_in_days}`.
-Значение токена (`stk_…`) показывается один раз, хранится только его SHA-256. Токен передаётся как
-`Authorization: Bearer stk_…`. Отзыв: `DELETE /api/v1/api-tokens/{id}`, действует сразу.
+`{name, kind: agent|ci|automation, scopes: [ingest:profile|ingest:match|ingest:findings], expires_in_days,
+cert_cn?, source_type?, source_uri_pattern?, environment?}`. Значение токена (`stk_…`) показывается один раз,
+хранится только его SHA-256. Токен передаётся как `Authorization: Bearer stk_…`. Отзыв:
+`DELETE /api/v1/api-tokens/{id}`, действует сразу. Необязательные привязки:
+
+| Поле | Действие |
+|---|---|
+| `cert_cn` | токен принимается только вместе с клиентским сертификатом этого CN, проверенным edge (mTLS). При `ST_INGEST_REQUIRE_CLIENT_CERT=true` (так в compose) обязателен |
+| `source_type`, `source_uri_pattern` | токен может сообщать только об источниках этого типа и с URI по glob (`*` не пересекает `/`, `**` пересекает) |
+| `environment` | сканы записываются под этим окружением; заявить другое токен не может (иначе он подобрал бы окружение под allow-правило) |
+
+Нарушение привязки источника или окружения даёт 403 с объяснением. Неверный или отсутствующий сертификат
+даёт тот же 401, что и неверный токен; причина пишется в лог сервера (`API token refused`).
 
 ## Локальная разработка
 
@@ -256,11 +272,11 @@ POST /api/v1/secrets
   которые раньше сообщал тот же токен и которые не видел ни один скан после начала этого: чужой токен
   не может «закрыть» находки, а параллельные сканы не сбрасывают друг друга.
 - **Зависший скан** старше 24 часов можно только завершить со статусом `failed`.
-- **Известное ограничение до этапа 13:** токен со scope `ingest:profile` сам указывает `environment`
-  и может попасть под allow-правило с этим окружением. Закроется привязкой токена к источнику (вместе с mTLS).
+- **Окружение и источник** токен по умолчанию указывает сам и может подобрать их под allow-правило.
+  Для токенов CI и агентов задавайте привязки `environment` и `source_uri_pattern` (см. API-токены выше).
 - Совпадения с `revoked` и `rotated` секретами тоже записываются: утечка старого значения остаётся утечкой.
-- Клиент — `secrettrace scan … --server` (см. [CLI в CI](#cli-в-ci-отправка-на-сервер-и-коды-выхода));
-  mTLS перед этим API появится на этапе 13.
+- Клиент — `secrettrace scan … --server` (см. [CLI в CI](#cli-в-ci-отправка-на-сервер-и-коды-выхода)).
+  В compose ingest доступен только по mTLS на порту 8443 (см. [TLS и mTLS](#tls-и-mtls-edge)).
 
 ## Источники и серверное сканирование (воркер)
 
@@ -406,8 +422,10 @@ secrettrace scan git /srv/mirror.git --rev main --rev ^3687a59   # только 
 
 ```sh
 export SECRETTRACE_TOKEN=stk_…            # токен kind=ci со scopes ingest:profile, ingest:match, ingest:findings
-secrettrace scan git . --server https://st.example.com --environment ci
-secrettrace scan fs /etc/app --server https://st.example.com --source-uri host:web-01/etc/app
+export SECRETTRACE_CA_CERT=ca.crt         # CA edge (deploy/pki/out/ca/ca.crt), если он частный
+export SECRETTRACE_CLIENT_CERT=client.crt SECRETTRACE_CLIENT_KEY=client.key   # make client-cert CN=…
+secrettrace scan git . --server https://st.example.com:8443 --environment ci
+secrettrace scan fs /etc/app --server https://st.example.com:8443 --source-uri host:web-01/etc/app
 ```
 
 | Код | Значение |
@@ -434,7 +452,9 @@ secrettrace scan fs /etc/app --server https://st.example.com --source-uri host:w
 - **Токен** берётся только из `SECRETTRACE_TOKEN` или `--token-file`, не из аргументов (они видны в `ps`).
   `--server` из окружения не читается: отправка данных всегда явная.
 - **Транспорт.** `http://` разрешён только для loopback (иначе нужен `--allow-http`), редиректы не выполняются
-  (токен не уйдёт на другой хост), собственный CA — `--ca-cert` или `SECRETTRACE_CA_CERT`. Ошибки соединения
+  (токен не уйдёт на другой хост), собственный CA — `--ca-cert` или `SECRETTRACE_CA_CERT`, клиентский
+  сертификат для mTLS — `--client-cert`/`--client-key` или `SECRETTRACE_CLIENT_CERT`/`SECRETTRACE_CLIENT_KEY`
+  (только с `https://`). Ошибки соединения
   и 502/503 повторяются до 4 раз с паузой 1–4 с; текст ошибок сервера печатается без управляющих символов.
 - **Лимиты.** Бюджет `ST_INGEST_DIGESTS_PER_HOUR` (по умолчанию 200 000 уникальных digest'ов в час на токен)
   рассчитан на обычные репозитории; первый скан большой истории может упереться в него (429, код 2).
@@ -444,6 +464,43 @@ secrettrace scan fs /etc/app --server https://st.example.com --source-uri host:w
 (`docker build --target cli -t secrettrace-cli .`: `secrettrace` и git, пользователь 65532). Для git
 в образе отключена проверка владельца репозитория (`safe.directory=*`): checkout обычно принадлежит
 другому пользователю, а CLI только читает репозиторий и отключает `core.fsmonitor`.
+
+## TLS и mTLS (edge)
+
+nginx (`deploy/nginx/nginx.conf`) — единственная точка входа; сервер без опубликованного порта.
+
+| Порт (хост → контейнер) | Что | Доступ |
+|---|---|---|
+| 443 → 8443 | веб-интерфейс и `/api/v1/*` кроме ingest | TLS 1.2/1.3, HSTS; `/api/v1/ingest/` отвечает 403 |
+| 8443 → 9443 | только `/api/v1/ingest/*` и `/healthz` | mTLS: клиентский сертификат от CA SecretTrace, проверка по CRL |
+
+- **Привязка CN.** Edge передаёт CN проверенного сертификата в `X-SecretTrace-Client-CN`, на порту 443 этот
+  заголовок всегда очищается. Сервер читает его только от `ST_TRUSTED_PROXIES` — фиксированного адреса edge
+  в своей подсети (`ST_EDGE_PROXY_IP`, по умолчанию 10.213.0.10), поэтому прямой клиент CN не подделает.
+  Токен с `cert_cn` принимается только с этим CN; в compose `ST_INGEST_REQUIRE_CLIENT_CERT=true`, и токены
+  без `cert_cn` не выпускаются и не принимаются.
+- **Заголовки.** `X-Forwarded-For` заменяется адресом клиента (не дописывается), `X-Request-Id` клиента
+  отбрасывается — его выдаёт сервер. Лог edge — JSON: путь без query, статус, время, CN, request id.
+- **Контейнер edge:** `nginx:1.27-alpine` под uid 101, read-only FS, `cap_drop: ALL`, `no-new-privileges`,
+  без entrypoint-скриптов образа. Приватный ключ CA в контейнер не монтируется.
+
+PKI для dev и небольших установок — `deploy/pki/pki.sh` (openssl, EC P-256):
+
+```sh
+make pki HOSTS="st.example.com"     # CA на 10 лет, сертификат edge на 397 дней (localhost, 127.0.0.1, ::1 + HOSTS)
+make client-cert CN=ci-infra        # клиентский сертификат на 365 дней → deploy/pki/out/clients/ci-infra/
+make revoke-cert CN=ci-infra        # отзыв, новый CRL и reload edge
+deploy/pki/pki.sh crl && docker compose exec edge nginx -s reload   # продлить CRL
+deploy/pki/pki.sh list
+```
+
+- **CRL действует 90 дней** (`CRL_DAYS`). Когда он истекает, edge отклоняет **все** клиентские сертификаты:
+  поставьте `pki.sh crl` и reload в cron (например, раз в месяц).
+- Ключ CA лежит в `deploy/pki/out/ca/ca.key` (0600, каталог 0700). Храните его вне сервера или замените
+  этот CA своим: edge нужны только `ca.crt`, `crl.pem`, `fullchain.crt` и `server.key`.
+- Ключ edge (`server.key`) имеет права 0644, иначе nginx под uid 101 не прочитает его через bind mount;
+  на хосте его защищает каталог 0700, как и файлы в `deploy/secrets`.
+- CN: 1–64 символа `[A-Za-z0-9._-]`. Это же правило проверяют сервер и база.
 
 ## Конфигурация
 
@@ -460,7 +517,8 @@ secrettrace scan fs /etc/app --server https://st.example.com --source-uri host:w
 | `ST_COOKIE_SECURE` | `true` | `Secure` и префикс `__Host-` у cookie; `false` только для разработки по HTTP |
 | `ST_SESSION_TTL_SECS` / `ST_SESSION_IDLE_SECS` | `43200` / `1800` | срок жизни сессии и тайм-аут бездействия |
 | `ST_TOTP_ISSUER` | `SecretTrace` | имя в приложении-аутентификаторе |
-| `ST_TRUSTED_PROXIES` | — | IP прокси, чьему `X-Forwarded-For` доверять |
+| `ST_TRUSTED_PROXIES` | — | IP прокси, чьим `X-Forwarded-For` и `X-SecretTrace-Client-CN` доверять (в compose — адрес edge) |
+| `ST_INGEST_REQUIRE_CLIENT_CERT` | `false` | каждый API-токен должен быть привязан к сертификату (`cert_cn`) и приходить через mTLS; требует `ST_TRUSTED_PROXIES` |
 | `ST_LISTEN_ADDR` | `0.0.0.0:8080` | адрес API |
 | `ST_LOG_FORMAT` / `ST_LOG` | `json` / `info` | формат и фильтр логов |
 | `ST_DB_MAX_CONNECTIONS` | `10` | размер пула |
@@ -502,6 +560,6 @@ crates/st-cli      CLI `secrettrace`: `digest`, `extract`, `scan fs|git [--serve
 web/               веб-интерфейс (React + TypeScript), порт нормализации и digest в web/src/crypto
 migrations/        SQL-миграции (встраиваются в бинарник)
 testdata/          общие тест-векторы digest (эталон посчитан независимой реализацией на Python)
-deploy/            init-скрипт Postgres, секреты (gitignored), примеры CI (deploy/ci)
+deploy/            init-скрипт Postgres, секреты (gitignored), nginx (edge), PKI-скрипт, примеры CI (deploy/ci)
 docs/              архитектура и ADR
 ```

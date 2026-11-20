@@ -155,6 +155,7 @@ mod tests {
             cookie_secure: secure,
             totp_issuer: "SecretTrace".into(),
             trusted_proxies: vec![],
+            require_client_cert: false,
         }
     }
 

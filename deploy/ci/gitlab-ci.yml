@@ -2,15 +2,20 @@
 # locations its allow rules permit. Include from .gitlab-ci.yml or copy the job.
 #
 # Settings → CI/CD → Variables:
-#   SECRETTRACE_TOKEN   API token of kind `ci` with scopes ingest:profile, ingest:match,
-#                       ingest:findings (masked, protected)
-#   SECRETTRACE_SERVER  https://secrettrace.example.com
+#   SECRETTRACE_TOKEN        API token of kind `ci` with scopes ingest:profile, ingest:match,
+#                            ingest:findings, bound to the client certificate below
+#                            (cert_cn); masked, protected
+#   SECRETTRACE_SERVER       https://secrettrace.example.com:8443 (the mTLS port)
+#   SECRETTRACE_CLIENT_CERT  type File: client.crt (make client-cert CN=…)
+#   SECRETTRACE_CLIENT_KEY   type File: client.key; protected
+#   SECRETTRACE_CA_CERT      type File: deploy/pki/out/ca/ca.crt (private CA only)
+# File variables arrive as paths, which is what the CLI reads from these names.
 # The CLI image is built from this repository: docker build --target cli -t <image> .
 #
 # Exit codes: 0 clean, 1 registered secrets outside allowed locations (see --fail-on),
-# 2 error (no token, server unreachable, unreadable files): the result is unknown.
-# The job token GitLab puts into the remote URL is stripped before anything is sent;
-# --source-uri makes the recorded URI explicit anyway.
+# 2 error (no token, server unreachable, rejected certificate, unreadable files): the
+# result is unknown. The job token GitLab puts into the remote URL is stripped before
+# anything is sent; --source-uri makes the recorded URI explicit anyway.
 secrettrace:
   stage: test
   image:

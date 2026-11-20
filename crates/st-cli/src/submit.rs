@@ -206,7 +206,12 @@ impl<'c> Scan<'c> {
 /// Add a hint to the common token mistakes.
 fn explain(e: &ApiError, scope: &str) -> anyhow::Error {
     let hint = match e.status.map(|s| s.as_u16()) {
-        Some(401) => " (the API token is invalid, expired or revoked)",
+        Some(401) => {
+            " (the API token is invalid, expired or revoked, or it is bound to a client certificate: \
+             use the mTLS port with --client-cert)"
+        }
+        // A 403 with the server's own explanation (token bindings, wrong port) speaks for itself.
+        Some(403) if e.message != "Forbidden" => "",
         Some(403) => match scope {
             "ingest:profile" => " (the token needs the ingest:profile scope)",
             "ingest:match" => " (the token needs the ingest:match scope)",

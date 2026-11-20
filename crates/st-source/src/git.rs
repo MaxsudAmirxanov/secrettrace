@@ -382,6 +382,22 @@ impl GitRepo {
         Ok(entries)
     }
 
+    /// The configured URL of a remote (`remote.<name>.url`, as written in the config, without
+    /// `insteadOf` rewriting), or `None` when the remote is not configured. May contain
+    /// credentials (CI checkouts often embed a token): callers must strip them.
+    pub fn remote_url(&self, remote: &str) -> Result<Option<String>, SourceError> {
+        if remote.is_empty()
+            || remote.starts_with('-')
+            || !remote.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.'))
+        {
+            return Ok(None);
+        }
+        let key = format!("remote.{remote}.url");
+        let out = self.run("config", &os_args(&["config", "--default", "", "--get", &key]))?;
+        let url = String::from_utf8_lossy(&out).trim().to_owned();
+        Ok(Some(url).filter(|u| !u.is_empty()))
+    }
+
     /// Commit ids the branches and tags point to (annotated tags peeled), sorted, unique.
     pub fn ref_tips(&self) -> Result<Vec<ObjectId>, SourceError> {
         let out = self.run(

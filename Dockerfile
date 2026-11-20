@@ -7,8 +7,9 @@ COPY migrations ./migrations
 COPY testdata ./testdata
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p st-server \
- && cp target/release/secrettrace-server /secrettrace-server
+    cargo build --release --locked -p st-server -p st-cli \
+ && cp target/release/secrettrace-server /secrettrace-server \
+ && cp target/release/secrettrace /secrettrace
 
 # Web UI: static build only; node never reaches a runtime image.
 FROM node:22-bookworm-slim AS web
@@ -18,6 +19,21 @@ RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund
 COPY web ./
 COPY testdata /src/testdata
 RUN npm run build
+
+# CLI for CI jobs: `secrettrace` and git (no network tools, no shell profile). Build with
+# `--target cli`. The checkout is usually owned by another user than 65532, so git's
+# ownership check is relaxed system-wide; the CLI already disables fsmonitor and other
+# config-driven execution, and only reads the repository.
+FROM debian:bookworm-slim AS cli
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* \
+ && git config --system safe.directory '*' \
+ && groupadd --gid 65532 nonroot \
+ && useradd --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin nonroot
+COPY --from=build /secrettrace /usr/local/bin/secrettrace
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/secrettrace"]
 
 # Worker: needs git and ssh to fetch repositories. Same binary, non-root, no package
 # caches. Build with `--target worker`.

@@ -5,12 +5,22 @@
 //! then zeroized. Only the digest and policy-compliant hints are printed.
 //!
 //! `extract` and `scan` run the candidate extractor locally and print masked findings;
-//! digests are printed only on explicit request.
+//! digests are printed only on explicit request. `scan … --server` sends the scan to the
+//! server (only digests, then locations of registered ones) and `register` adds a secret
+//! to the registry.
+//!
+//! Exit codes: 0 — success; 1 — registered secrets found (`scan --server`, see
+//! `--fail-on`); 2 — error (bad arguments, unreadable files, server unreachable or
+//! rejecting the request): the result is not known.
 
+mod client;
+mod register;
 mod scan;
+mod submit;
 
 use std::io::{IsTerminal as _, Read as _, Write as _};
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use anyhow::{Context as _, bail};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -59,6 +69,11 @@ enum Command {
         #[command(subcommand)]
         target: scan::Target,
     },
+    /// Register a secret on the server by its digest (signs in with password and TOTP).
+    ///
+    /// The value is read from a hidden prompt or stdin and never leaves this machine;
+    /// the password and TOTP code are read from the terminal.
+    Register(register::RegisterArgs),
 }
 
 /// Output options shared by `extract` and `scan`.
@@ -134,25 +149,34 @@ struct DigestOutput {
     masked: String,
 }
 
-fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
-        Command::Digest { secret_type, stdin } => digest(secret_type.into(), stdin),
-        Command::Extract { paths, output } => ignore_broken_pipe(extract(&paths, &output)),
+/// Exit code for errors: the outcome is unknown (distinct from 1, "secrets found").
+const EXIT_ERROR: u8 = 2;
+
+fn main() -> ExitCode {
+    let ok = |r: anyhow::Result<()>| r.map(|()| ExitCode::SUCCESS);
+    let result = match Cli::parse().command {
+        Command::Digest { secret_type, stdin } => ok(digest(secret_type.into(), stdin)),
+        Command::Extract { paths, output } => ignore_broken_pipe(ok(extract(&paths, &output))),
         Command::Scan { target } => ignore_broken_pipe(scan::run(target)),
-    }
+        Command::Register(args) => ok(register::run(&args)),
+    };
+    result.unwrap_or_else(|e| {
+        eprintln!("secrettrace: error: {e:#}");
+        ExitCode::from(EXIT_ERROR)
+    })
 }
 
 /// `secrettrace extract … | head` closes the pipe early; that is not an error.
-fn ignore_broken_pipe(result: anyhow::Result<()>) -> anyhow::Result<()> {
+fn ignore_broken_pipe(result: anyhow::Result<ExitCode>) -> anyhow::Result<ExitCode> {
     match result {
         Err(e) if e.downcast_ref::<std::io::Error>().is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe) => {
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
         Err(e)
             if e.downcast_ref::<serde_json::Error>()
                 .is_some_and(|j| j.io_error_kind() == Some(std::io::ErrorKind::BrokenPipe)) =>
         {
-            Ok(())
+            Ok(ExitCode::SUCCESS)
         }
         other => other,
     }

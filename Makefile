@@ -60,7 +60,8 @@ db-down: ## Remove the test Postgres
 
 test-unit: ## Unit tests only (no database)
 	cargo test --workspace --lib --bins
-	cargo test -p st-core -p st-extract -p st-source -p st-cli
+	cargo test -p st-core -p st-extract -p st-source
+	cargo test -p st-cli --test cli
 
 test-db: db-up ## Full test suite including Postgres integration tests
 	DATABASE_URL=$(TEST_DB_URL) cargo test --workspace

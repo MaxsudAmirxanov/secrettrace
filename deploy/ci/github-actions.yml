@@ -1,0 +1,43 @@
+# SecretTrace in GitHub Actions: fail the build when a registered secret appears outside
+# the locations its allow rules permit. Copy to .github/workflows/secrettrace.yml.
+#
+# Repository settings:
+#   Secrets   → SECRETTRACE_TOKEN   API token of kind `ci` with scopes ingest:profile,
+#                                   ingest:match, ingest:findings (web UI → API tokens)
+#   Variables → SECRETTRACE_SERVER  https://secrettrace.example.com
+# The CLI image is built from this repository: docker build --target cli -t <image> .
+#
+# Exit codes: 0 clean, 1 registered secrets outside allowed locations (see --fail-on),
+# 2 error (no token, server unreachable, unreadable files): the result is unknown.
+# Pull requests from forks get no secrets, so the job exits 2 there.
+name: secrettrace
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0             # the whole history; with depth 1 only the current tree is read
+          persist-credentials: false # keep the job token out of .git/config
+      - name: Scan the repository
+        env:
+          SECRETTRACE_TOKEN: ${{ secrets.SECRETTRACE_TOKEN }}
+          SECRETTRACE_SERVER: ${{ vars.SECRETTRACE_SERVER }}
+          IMAGE: registry.example.com/secrettrace/cli:0.1.0
+        # --source-uri: use the same URI as a server-side source of this repository (if any),
+        # so the worker and CI update the same locations.
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" \
+            -v "$GITHUB_WORKSPACE:/repo:ro" -e SECRETTRACE_TOKEN \
+            "$IMAGE" scan git /repo \
+              --server "$SECRETTRACE_SERVER" \
+              --source-uri "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" \
+              --environment ci

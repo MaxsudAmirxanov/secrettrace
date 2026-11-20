@@ -1,0 +1,26 @@
+# SecretTrace in GitLab CI: fail the pipeline when a registered secret appears outside the
+# locations its allow rules permit. Include from .gitlab-ci.yml or copy the job.
+#
+# Settings → CI/CD → Variables:
+#   SECRETTRACE_TOKEN   API token of kind `ci` with scopes ingest:profile, ingest:match,
+#                       ingest:findings (masked, protected)
+#   SECRETTRACE_SERVER  https://secrettrace.example.com
+# The CLI image is built from this repository: docker build --target cli -t <image> .
+#
+# Exit codes: 0 clean, 1 registered secrets outside allowed locations (see --fail-on),
+# 2 error (no token, server unreachable, unreadable files): the result is unknown.
+# The job token GitLab puts into the remote URL is stripped before anything is sent;
+# --source-uri makes the recorded URI explicit anyway.
+secrettrace:
+  stage: test
+  image:
+    name: registry.example.com/secrettrace/cli:0.1.0
+    entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"   # the whole history; a shallow clone reads only what it has
+  script:
+    - >
+      secrettrace scan git "$CI_PROJECT_DIR"
+      --server "$SECRETTRACE_SERVER"
+      --source-uri "$CI_PROJECT_URL.git"
+      --environment ci

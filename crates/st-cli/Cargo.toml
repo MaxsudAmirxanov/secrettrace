@@ -1,6 +1,6 @@
 [package]
 name = "st-cli"
-description = "SecretTrace command-line client: local digests, extraction and filesystem/git scanning"
+description = "SecretTrace command-line client: digests, extraction, filesystem/git scanning, CI submission and registration"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -21,10 +21,19 @@ rpassword.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zeroize.workspace = true
+ureq = { version = "3.5.2", default-features = false, features = ["rustls", "json"] }
 
 [dev-dependencies]
+# Integration tests run the binary against a real server (tests/server.rs).
+st-server = { path = "../st-server" }
+axum.workspace = true
+base64.workspace = true
+secrecy.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

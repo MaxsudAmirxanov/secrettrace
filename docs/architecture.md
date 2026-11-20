@@ -46,7 +46,7 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 | `st-extract` | извлечение кандидатов из текста, локальный digest; общий для CLI, агентов и воркера |
 | `st-source` | источники: файловая система и git-история → документы для экстрактора; пул потоков |
 | `st-server` | API, воркер, админ-команды (`migrate`, `verify-audit`, `gen-pepper`) |
-| `st-cli` | `secrettrace`: `digest`, `extract`, `scan fs|git` (локально); `register` и отправка на сервер позже |
+| `st-cli` | `secrettrace`: `digest`, `extract`, `scan fs|git` (локально или `--server`), `register` |
 
 Очередь в MVP — сам Postgres (`FOR UPDATE SKIP LOCKED` + outbox). NATS JetStream появится на этапе 2 для
 потоковых коллекторов. События использования будут лежать в партиционированной таблице (TimescaleDB при росте).
@@ -187,6 +187,16 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   может только код.
 - **Аудит**: `ingest.scan_start`, `ingest.match`, `ingest.findings`, `ingest.scan_complete` от имени токена;
   в деталях только счётчики и id. Алерты на новые нарушения — этап 10.
+- **Клиент — CLI** (`scan … --server`, `ureq` + rustls). Находки строятся так же, как у воркера (пути из `HEAD`
+  с `in_current_state`, путь из истории, коммит появления через `locate` только для совпавших blob'ов), дерево
+  `HEAD` читается всегда, поэтому скан полный. URI по умолчанию — `origin` без userinfo/query/fragment.
+  Коды выхода: 0 — чисто, 1 — найдено (`--fail-on violations|found|never`), 2 — ошибка, результат неизвестен;
+  неполный скан закрывается как `failed`. Токен — только из окружения или файла, `--server` — только из
+  аргументов; `http://` только для loopback, без редиректов, повторы только для ошибок соединения и 502/503.
+  Типы запросов CLI дублируют серверные (без зависимости от `st-server`); их совместимость проверяет
+  `crates/st-cli/tests/server.rs`, который запускает бинарник против настоящего сервера.
+- **`register`** — операция человека: пароль и TOTP с терминала, одна сессия на один `POST /secrets`,
+  затем logout; значение хешируется и затирается до входа. API-токены к реестру доступа не имеют.
 
 ## 9. Воркер
 
@@ -305,7 +315,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 8 | Ingest: scan-profile / match / findings, матчинг, upsert locations, allow-rules, rate-limit; пересчёт `is_allowed` у найденных мест при изменении allow-rules | ✅ |
 | 9 | Воркер: очередь, планировщик, клонирование по `credential_ref`; API источников и сканов | ✅ |
 | 10 | Алерты: правила, дедупликация, outbox, Telegram и webhook (HMAC-подпись) | |
-| 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | |
+| 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | ✅ |
 | 12 | Web UI (React + TS): логин и MFA, обзор, находки, секреты, источники, сканы, токены, пользователи, аудит | ✅ |
 | 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | |
 | 14 | E2E в compose, threat model | |

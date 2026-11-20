@@ -493,6 +493,7 @@ impl Worker {
             allow_local: cfg.allow_local_repos,
         };
         let remote = remote::parse(&uri, policy)?;
+        let pinned = remote::resolve_pinned(&remote).await?;
         let known_hosts = match remote.transport {
             Transport::Ssh => Some(
                 cfg.ssh_known_hosts
@@ -553,6 +554,7 @@ impl Worker {
                 ssh_key: copy.filter(|_| is_key),
                 known_hosts,
                 max_repo_bytes: cfg.max_repo_bytes,
+                pinned,
             };
             env.sync_mirror(&mirror).await?;
         }

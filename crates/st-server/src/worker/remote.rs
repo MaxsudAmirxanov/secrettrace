@@ -4,6 +4,15 @@
 //! `user@host:path`; with `allow_local_repos` also `file:///abs` and absolute paths.
 //! Plain `http://`, `git://`, `ext::`, `fd::`, relative paths, IPv6 literals and anything
 //! git could take for an option (a host, user or path starting with `-`) are refused.
+//!
+//! Hosts allowed only by `allow_any_host` (not listed) get two more checks, against SSRF
+//! into the deployment's own network: internal-looking names (`localhost`, single labels
+//! such as compose service names, `.local`, `.internal`…) are refused up front, and the
+//! name is resolved before the fetch: every address must be public, and git is pinned to
+//! the checked one (`http.curloptResolve`, ssh `HostName`), so a second DNS answer
+//! (rebinding) is never used. Through an HTTP proxy the proxy resolves the name itself.
+
+use std::net::{IpAddr, Ipv4Addr};
 
 use super::JobError;
 
@@ -21,6 +30,10 @@ pub struct Remote {
     pub host: String,
     /// The user given in an scp-like URI (`git@host:path`).
     pub user: Option<String>,
+    /// Explicit port of an `https://` or `ssh://` URI.
+    pub port: Option<u16>,
+    /// Allowed only through `allow_any_host`: resolve, require public addresses, pin.
+    pub pin: bool,
 }
 
 /// Hosts a source may point at: an explicit list, or (only when the deployer opted in
@@ -38,12 +51,91 @@ pub fn parse(uri: &str, policy: HostPolicy<'_>) -> Result<Remote, JobError> {
         return Ok(remote);
     }
     let listed = policy.allowed.iter().any(|h| h.eq_ignore_ascii_case(&remote.host));
-    let allowed =
-        if is_ip_literal(&remote.host) { listed } else { listed || (policy.allowed.is_empty() && policy.allow_any) };
-    if !allowed {
+    let any = !listed
+        && policy.allowed.is_empty()
+        && policy.allow_any
+        && !is_ip_literal(&remote.host)
+        && !internal_name(&remote.host);
+    if !listed && !any {
         return Err(JobError::permanent("source host is not allowed"));
     }
-    Ok(remote)
+    Ok(Remote { pin: any, ..remote })
+}
+
+/// Names that point into the local or private network rather than at a public git host.
+fn internal_name(host: &str) -> bool {
+    const SUFFIXES: &[&str] =
+        &[".localhost", ".local", ".internal", ".lan", ".home.arpa", ".localdomain", ".intranet", ".corp"];
+    let host = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    host == "localhost" || !host.contains('.') || SUFFIXES.iter().any(|s| host.ends_with(s))
+}
+
+/// Is this an address a public git host may have? Loopback, private, link-local,
+/// shared (CGNAT), documentation, benchmarking, multicast and reserved ranges are not,
+/// including IPv4 embedded in IPv6 (mapped, NAT64).
+#[must_use]
+pub fn is_public(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => public_v4(v4),
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return public_v4(v4);
+            }
+            let s = v6.segments();
+            if s[0] == 0x64 && s[1] == 0xff9b {
+                // NAT64 well-known prefix: the low 32 bits are the IPv4 target.
+                let low = (u32::from(s[6]) << 16) | u32::from(s[7]);
+                return public_v4(Ipv4Addr::from(low));
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (s[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (s[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated)
+                || (s[0] == 0x2001 && s[1] == 0x0db8)) // documentation
+        }
+    }
+}
+
+fn public_v4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    !(ip.is_loopback()
+        || ip.is_private()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_multicast()
+        || ip.is_documentation()
+        || a == 0
+        || (a == 100 && (64..128).contains(&b)) // shared address space (CGNAT)
+        || (a == 192 && b == 0 && c == 0) // IETF protocol assignments
+        || (a == 198 && (18..20).contains(&b)) // benchmarking
+        || a >= 240) // reserved
+}
+
+/// For a pinned remote: resolve the host and return the address git must use. Every
+/// resolved address must be public, so a mixed answer cannot slip an internal one in.
+pub async fn resolve_pinned(remote: &Remote) -> Result<Option<IpAddr>, JobError> {
+    if !remote.pin {
+        return Ok(None);
+    }
+    let port = remote.port.unwrap_or(match remote.transport {
+        Transport::Ssh => 22,
+        _ => 443,
+    });
+    let addrs: Vec<IpAddr> = tokio::net::lookup_host((remote.host.as_str(), port))
+        .await
+        .map_err(|_| JobError::retryable("cannot resolve the source host"))?
+        .map(|a| a.ip())
+        .collect();
+    if addrs.is_empty() {
+        return Err(JobError::retryable("cannot resolve the source host"));
+    }
+    if !addrs.iter().all(|&ip| is_public(ip)) {
+        return Err(JobError::permanent("source host resolves to a non-public address"));
+    }
+    Ok(addrs.first().copied())
 }
 
 /// Would a resolver take this host for an IPv4 address? Every dot-separated label is a
@@ -88,7 +180,7 @@ fn classify(uri: &str, allow_local: bool) -> Option<Remote> {
 }
 
 fn local() -> Remote {
-    Remote { transport: Transport::Local, host: String::new(), user: None }
+    Remote { transport: Transport::Local, host: String::new(), user: None, port: None, pin: false }
 }
 
 fn local_path_ok(path: &str) -> bool {
@@ -105,10 +197,14 @@ fn url_remote(rest: &str, transport: Transport) -> Option<Remote> {
         Some((h, p)) => (h, Some(p)),
         None => (authority, None),
     };
-    if !host_ok(host) || port.is_some_and(|p| !p.parse::<u16>().is_ok_and(|n| n > 0)) {
+    let port = match port {
+        Some(p) => Some(p.parse::<u16>().ok().filter(|&n| n > 0)?),
+        None => None,
+    };
+    if !host_ok(host) {
         return None;
     }
-    Some(Remote { transport, host: host.to_ascii_lowercase(), user: None })
+    Some(Remote { transport, host: host.to_ascii_lowercase(), user: None, port, pin: false })
 }
 
 /// `user@host:path`.
@@ -122,7 +218,13 @@ fn scp_remote(uri: &str) -> Option<Remote> {
     if !user_ok || !host_ok(host) || path.is_empty() || path.starts_with('-') || user.contains('/') {
         return None;
     }
-    Some(Remote { transport: Transport::Ssh, host: host.to_ascii_lowercase(), user: Some(user.to_owned()) })
+    Some(Remote {
+        transport: Transport::Ssh,
+        host: host.to_ascii_lowercase(),
+        user: Some(user.to_owned()),
+        port: None,
+        pin: false,
+    })
 }
 
 fn host_ok(host: &str) -> bool {
@@ -149,6 +251,7 @@ mod tests {
     fn accepted_forms() {
         let r = ok("https://Git.Example:8443/infra/app.git");
         assert_eq!((r.transport, r.host.as_str(), r.user), (Transport::Https, "git.example", None));
+        assert_eq!((r.port, r.pin), (Some(8443), true), "allowed through allow_any: pinned");
         assert_eq!(ok("ssh://git.example/infra/app.git").transport, Transport::Ssh);
         let scp = ok("git@git.example:infra/app.git");
         assert_eq!((scp.transport, scp.user.as_deref()), (Transport::Ssh, Some("git")));
@@ -227,5 +330,64 @@ mod tests {
         assert!(parse("https://10.0.0.5/a", policy).is_ok(), "listed literally");
         assert!(parse("https://10.0.0.6/a", policy).is_err());
         assert!(parse("https://[::1]/a", ANY).is_err(), "IPv6 literals are never accepted");
+    }
+
+    #[test]
+    fn allow_any_refuses_internal_names_and_listed_hosts_are_not_pinned() {
+        for host in
+            ["localhost", "server", "postgres", "git.local", "vault.internal", "nas.lan", "x.home.arpa", "LOCALHOST."]
+        {
+            let err = parse(&format!("https://{host}/a"), ANY).map(|_| ()).unwrap_err();
+            assert_eq!(err.message, "source host is not allowed", "{host}");
+            assert!(parse(&format!("git@{host}:a"), ANY).is_err(), "{host}");
+        }
+        let listed = vec!["gitlab".to_owned()];
+        let policy = HostPolicy { allowed: &listed, allow_any: false, allow_local: false };
+        let r = parse("https://gitlab/a", policy).unwrap();
+        assert!(!r.pin, "an operator-listed host is trusted as is");
+    }
+
+    #[test]
+    fn public_addresses() {
+        for ip in ["140.82.112.3", "2606:4700::6810:84e5", "8.8.8.8"] {
+            assert!(is_public(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+            "0.0.0.0",
+            "198.18.0.1",
+            "192.0.0.8",
+            "224.0.0.1",
+            "255.255.255.255",
+            "240.0.0.1",
+            "192.0.2.1",
+            "::1",
+            "::",
+            "fd00::1",
+            "fe80::1",
+            "ff02::1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "64:ff9b::a00:1",
+        ] {
+            assert!(!is_public(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[tokio::test]
+    async fn resolution_refuses_non_public_answers() {
+        let mut r = ok("https://git.example/a");
+        // `localhost` resolves without network access; it can only get here forged.
+        r.host = "localhost".into();
+        let err = resolve_pinned(&r).await.unwrap_err();
+        assert_eq!((err.message.as_str(), err.retryable), ("source host resolves to a non-public address", false));
+        r.pin = false;
+        assert_eq!(resolve_pinned(&r).await.unwrap(), None, "listed hosts are not resolved here");
     }
 }

@@ -441,6 +441,16 @@ pub async fn list_locations(
     Ok(Page { items, next_cursor })
 }
 
+/// Outcome of a registration attempt.
+#[derive(Debug)]
+pub enum Registered {
+    Created(Box<SecretOut>),
+    /// The value is already registered as this secret. The attempt is audited
+    /// (`secret.create.duplicate`) in the caller's transaction, which must be committed:
+    /// otherwise "is value X registered?" would be an untraceable question for operators.
+    Duplicate(Uuid),
+}
+
 /// Register a secret. Runs inside the caller's transaction together with its audit record.
 pub async fn create(
     conn: &mut sqlx::Transaction<'_, Postgres>,
@@ -448,7 +458,7 @@ pub async fn create(
     req: &SecretCreate,
     created_by: Uuid,
     audit_event: AuditEvent,
-) -> Result<SecretOut, ApiError> {
+) -> Result<Registered, ApiError> {
     let name = text("name", &req.name, 200)?;
     let owner = text("owner", &req.owner, 200)?;
     let purpose = optional_text("purpose", req.purpose.as_deref(), 2000)?;
@@ -471,7 +481,12 @@ pub async fn create(
     .fetch_optional(&mut **conn)
     .await?;
     if let Some(id) = existing {
-        return Err(ApiError::Conflict(format!("this secret value is already registered (secret {id})")));
+        // Name and type only: never the digest or anything derived from it.
+        let event = AuditEvent { action: "secret.create.duplicate".into(), ..audit_event }
+            .target("secret", id.to_string())
+            .details(json!({ "attempted_name": name, "type": req.secret_type }));
+        audit::record(conn, &event).await?;
+        return Ok(Registered::Duplicate(id));
     }
 
     let (version, fingerprint) = pepper.fingerprint_current(&req.digest);
@@ -510,7 +525,7 @@ pub async fn create(
         "expires_at": out.expires_at,
     }));
     audit::record(conn, &event).await?;
-    Ok(out)
+    Ok(Registered::Created(Box::new(out)))
 }
 
 #[derive(sqlx::FromRow)]

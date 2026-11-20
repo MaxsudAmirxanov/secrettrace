@@ -71,12 +71,17 @@ impl RateLimiter {
     }
 }
 
-/// Limiters used by the auth routes.
+/// Registrations one user may attempt per hour.
+pub const SECRET_CREATES_PER_HOUR: u32 = 100;
+
+/// Limiters used by the auth routes and by secret registration.
 #[derive(Debug)]
 pub struct AuthLimiters {
     pub login_per_ip: RateLimiter,
     pub login_per_user: RateLimiter,
     pub mfa_per_user: RateLimiter,
+    /// `POST /secrets` per user: bounds registration as a "is X registered?" oracle.
+    pub secret_create_per_user: RateLimiter,
 }
 
 impl Default for AuthLimiters {
@@ -86,6 +91,7 @@ impl Default for AuthLimiters {
             login_per_ip: RateLimiter::new(20, minute),
             login_per_user: RateLimiter::new(10, minute),
             mfa_per_user: RateLimiter::new(5, minute),
+            secret_create_per_user: RateLimiter::new(SECRET_CREATES_PER_HOUR, Duration::from_secs(3600)),
         }
     }
 }

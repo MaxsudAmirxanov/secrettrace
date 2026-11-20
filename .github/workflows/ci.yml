@@ -59,6 +59,15 @@ jobs:
       - name: npm audit (production dependencies)
         run: npm audit --omit=dev --audit-level=high
 
+  # The real compose stack (images, edge with mTLS, worker, CLI image), driven from outside.
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: deploy/e2e/run.sh
+        run: make e2e
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:

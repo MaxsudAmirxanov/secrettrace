@@ -113,6 +113,7 @@ impl Server {
         let mut tx = self.pool.begin().await.unwrap();
         let out =
             registry::create(&mut tx, &pepper(), &req, self.admin, AuditEvent::system("secret.create")).await.unwrap();
+        let registry::Registered::Created(out) = out else { panic!("{name} is already registered") };
         tx.commit().await.unwrap();
         out.id
     }

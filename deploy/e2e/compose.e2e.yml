@@ -1,0 +1,6 @@
+# Overlay for deploy/e2e/run.sh only: mounts the throwaway repositories the worker scans
+# as file:// sources (ST_WORKER_ALLOW_LOCAL_REPOS=true is set by the script).
+services:
+  worker:
+    volumes:
+      - ${E2E_REPOS:?E2E_REPOS must be set by deploy/e2e/run.sh}:/srv/e2e-repos:ro

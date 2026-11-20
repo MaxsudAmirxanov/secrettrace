@@ -40,8 +40,9 @@ pub async fn list(
     responses(
         (status = 201, body = SecretOut),
         (status = 403, body = Problem, content_type = "application/problem+json"),
-        (status = 409, description = "Name taken or value already registered", body = Problem, content_type = "application/problem+json"),
+        (status = 409, description = "Name taken or value already registered (the attempt is audited)", body = Problem, content_type = "application/problem+json"),
         (status = 422, body = Problem, content_type = "application/problem+json"),
+        (status = 429, description = "Too many registrations by this user", body = Problem, content_type = "application/problem+json"),
     ),
     security(("session" = [], "csrf" = []))
 )]
@@ -52,11 +53,21 @@ pub async fn create(
     ApiJson(req): ApiJson<SecretCreate>,
 ) -> ApiResult<(StatusCode, Json<SecretOut>)> {
     user.require(Role::Operator)?;
+    // Every attempt counts, created or duplicate: registration answers "is X registered?".
+    if !state.limiters.secret_create_per_user.check(&user.id.to_string()) {
+        return Err(ApiError::TooManyRequests);
+    }
     let mut tx = state.db.begin().await?;
-    let out =
+    let outcome =
         registry::create(&mut tx, &state.pepper, &req, user.id, meta.user_event(user.id, "secret.create")).await?;
+    // Committed in both cases: a duplicate leaves its audit record.
     tx.commit().await?;
-    Ok((StatusCode::CREATED, Json(out)))
+    match outcome {
+        registry::Registered::Created(out) => Ok((StatusCode::CREATED, Json(*out))),
+        registry::Registered::Duplicate(id) => {
+            Err(ApiError::Conflict(format!("this secret value is already registered (secret {id})")))
+        }
+    }
 }
 
 /// Get one secret.

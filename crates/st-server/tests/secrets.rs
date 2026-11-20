@@ -83,6 +83,16 @@ async fn duplicates_are_rejected_including_older_pepper_versions(pool: PgPool) {
     let same_value = register(&mut op, register_body("b", SecretType::ApiKey, AWS_KEY)).await;
     assert_eq!(same_value.status, StatusCode::CONFLICT);
     assert!(same_value.body["detail"].as_str().unwrap().contains("already registered"));
+    // The duplicate attempt is audited (name and type only, never the digest).
+    let dup: (Option<String>, serde_json::Value) =
+        sqlx::query_as("SELECT target_id, details FROM audit_log WHERE action = 'secret.create.duplicate'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(dup.1["attempted_name"], "b");
+    assert!(dup.0.is_some());
+    let digest_hex = prepare(SecretType::ApiKey, AWS_KEY).unwrap().0.to_hex();
+    assert!(!dup.1.to_string().contains(&digest_hex));
     let same_name = register(&mut op, register_body("a", SecretType::Token, "another-token-value-123")).await;
     assert_eq!(same_name.status, StatusCode::CONFLICT);
     assert!(same_name.body["detail"].as_str().unwrap().contains("name"));
@@ -377,4 +387,19 @@ async fn replacing_allow_rules_reevaluates_existing_locations(pool: PgPool) {
             .await
             .unwrap();
     assert_eq!(allowed, 0);
+}
+
+#[sqlx::test(migrator = "st_server::db::MIGRATOR")]
+async fn registrations_are_rate_limited_per_user(pool: PgPool) {
+    let app = router(state(pool.clone()));
+    let mut op = logged_in(&pool, &app, "op", Role::Operator).await;
+    let first = register(&mut op, register_body("a", SecretType::ApiKey, AWS_KEY)).await;
+    assert_eq!(first.status, StatusCode::CREATED);
+    // Duplicates count too: the budget bounds "is X registered?" probing.
+    for _ in 1..st_server::auth::ratelimit::SECRET_CREATES_PER_HOUR {
+        let r = register(&mut op, register_body("b", SecretType::ApiKey, AWS_KEY)).await;
+        assert_eq!(r.status, StatusCode::CONFLICT);
+    }
+    let r = register(&mut op, register_body("c", SecretType::Token, "another-token-value-123")).await;
+    assert_eq!(r.status, StatusCode::TOO_MANY_REQUESTS, "{}", r.body);
 }

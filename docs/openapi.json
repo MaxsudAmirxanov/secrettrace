@@ -1467,7 +1467,7 @@
             }
           },
           "409": {
-            "description": "Name taken or value already registered",
+            "description": "Name taken or value already registered (the attempt is audited)",
             "content": {
               "application/problem+json": {
                 "schema": {
@@ -1478,6 +1478,16 @@
           },
           "422": {
             "description": "",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many registrations by this user",
             "content": {
               "application/problem+json": {
                 "schema": {

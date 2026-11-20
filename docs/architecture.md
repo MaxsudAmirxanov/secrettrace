@@ -53,8 +53,13 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 
 ## 3. Безопасность самой системы
 
+Угрозы, сценарии атак и открытые вопросы — в [threat-model.md](threat-model.md).
+
 - Две роли БД: `st_owner` (только миграции) и `st_app` (рантайм). У `st_app` отозваны `UPDATE/DELETE/TRUNCATE`
   на `audit_log` и доступ к `_sqlx_migrations`. Это проверяется тестом.
+- **Гранты в миграциях явные:** миграция, создающая таблицу, сама выдаёт `st_app` нужные права
+  (`ALTER DEFAULT PRIVILEGES` не используется, чтобы новые таблицы не доставались рантайму молча).
+  Тест `runtime_role_grants_cover_every_table` сверяет права на все таблицы и последовательности.
 - Журнал аудита — hash-chain: `hash = SHA-256(domain || prev_hash || length-prefixed поля)`, вставки сериализованы
   advisory-lock'ом в транзакции действия. `secrettrace-server verify-audit` пересчитывает всю цепочку.
   Ограничение: удаление хвоста цепочки не обнаруживается; планируется периодический экспорт head-хеша.
@@ -90,6 +95,9 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
 
 - Регистрация принимает только digest. Сервер вычисляет отпечаток текущей версией pepper; дубликат ищется
   по отпечаткам всех настроенных версий (`UNNEST` по парам версия/отпечаток).
+- **Регистрация как оракул** («зарегистрирован ли X?»): дубликат даёт 409, но попытка пишется в аудит
+  (`secret.create.duplicate`, без digest) — транзакция коммитится и при отказе. Попыток — не больше 100 в час
+  на пользователя (429), дубликаты считаются наравне с успешными.
 - Hints повторно проверяются на сервере (`st_core::validate_hints`); БД дополнительно запрещает их CHECK'ами.
 - Allow-rules проверяются при сохранении (`policy::Glob`: линейный DP без регулярных выражений и без
   экспоненциального перебора). Сопоставление найденных мест с правилами выполняется на этапе 8.
@@ -260,7 +268,10 @@ d = SHA-256("secrettrace/v1\0" || canonical)  ──mTLS──▶  fp = HMAC-SHA
   кроме https/ssh, без редиректов, credential helper'ов, хуков, сабмодулей и авто-gc. URI проверяется до
   запуска git: `https://`, `ssh://`, `user@host:path`; хост и путь не начинаются с `-`; IP-литералы
   (включая десятичные и шестнадцатеричные формы IPv4) только если перечислены явно.
-  `ST_WORKER_ALLOWED_HOSTS` обязателен (пустой — только с `ST_WORKER_ALLOW_ANY_HOST=true`). Каждый git —
+  `ST_WORKER_ALLOWED_HOSTS` обязателен (пустой — только с `ST_WORKER_ALLOW_ANY_HOST=true`). Хосты, допущенные
+  только через `ALLOW_ANY_HOST`: внутренние имена (`localhost`, однословные, `.local`, `.internal`…) отвергаются,
+  имя резолвится до fetch, все адреса должны быть публичными, и git подключается к проверенному
+  (`http.curloptResolve`, ssh `HostName`/`HostKeyAlias`) — без повторного DNS-запроса (rebinding). Каждый git —
   в своей группе процессов, отмена и тайм-аут убивают группу (вместе с `git-remote-https` и `ssh`);
   `http.lowSpeedLimit`, ssh `ConnectTimeout`/`ServerAliveInterval`; `transfer.fsckObjects`; stdout и stderr
   читаются с ограничением; размер `objects/` проверяется во время fetch (`ST_WORKER_MAX_REPO_BYTES`).
@@ -347,7 +358,7 @@ forbidden|not-found|conflict|validation|rate-limited|payload-too-large|unsupport
 | 11 | CLI: `register`, `scan git/fs`, exit codes, примеры для GitHub Actions и GitLab CI | ✅ |
 | 12 | Web UI (React + TS): логин и MFA, обзор, находки, секреты, источники, сканы, токены, пользователи, аудит | ✅ |
 | 13 | nginx: TLS, mTLS на :8443, PKI-скрипты, привязка CN к токену | ✅ |
-| 14 | E2E в compose, threat model | |
+| 14 | E2E в compose, threat model ([threat-model.md](threat-model.md)) | threat model ✅, E2E — |
 
 Этапы после MVP: коллекторы (Vault audit, CloudTrail, auth.log, SDK) и граф (Cytoscape.js); canary-токены
 с trigger-сервером; политики и аномалии; ротация через Vault и AWS IAM.

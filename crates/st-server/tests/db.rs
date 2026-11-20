@@ -128,6 +128,44 @@ async fn runtime_role_cannot_modify_audit_log(pool: PgPool) {
     sqlx::query("RESET ROLE").execute(&mut *conn).await.unwrap();
 }
 
+/// Every table and sequence has exactly the grants the runtime role needs. Grants are
+/// explicit per migration (no `ALTER DEFAULT PRIVILEGES`, which would hand every future
+/// table to `st_app`); a migration that creates a table and forgets its `GRANT` fails here
+/// instead of failing at runtime.
+#[sqlx::test(migrator = "st_server::db::MIGRATOR")]
+async fn runtime_role_grants_cover_every_table(pool: PgPool) {
+    let tables: Vec<(String, bool, bool, bool, bool)> = sqlx::query_as(
+        "SELECT c.relname,
+                has_table_privilege('st_app', c.oid, 'SELECT'), has_table_privilege('st_app', c.oid, 'INSERT'),
+                has_table_privilege('st_app', c.oid, 'UPDATE'), has_table_privilege('st_app', c.oid, 'DELETE')
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') ORDER BY 1",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(tables.len() > 10, "{tables:?}");
+    for (name, select, insert, update, delete) in tables {
+        let want = match name.as_str() {
+            "_sqlx_migrations" => (false, false, false, false),
+            "audit_log" => (true, true, false, false),
+            _ => (true, true, true, true),
+        };
+        assert_eq!((select, insert, update, delete), want, "st_app grants on {name} (SELECT, INSERT, UPDATE, DELETE)");
+    }
+    let sequences: Vec<(String, bool)> = sqlx::query_as(
+        "SELECT c.relname, has_sequence_privilege('st_app', c.oid, 'USAGE')
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'S'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    for (name, usage) in sequences {
+        assert!(usage, "st_app needs USAGE on sequence {name}");
+    }
+}
+
 #[sqlx::test(migrator = "st_server::db::MIGRATOR")]
 async fn schema_constraints_protect_hint_policy(pool: PgPool) {
     let fp = vec![7u8; 32];

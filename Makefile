@@ -6,7 +6,7 @@ TEST_DB_URL := postgres://postgres:test@127.0.0.1:54329/secrettrace
 PKI := deploy/pki/pki.sh
 PKI_OUT := deploy/pki/out
 
-.PHONY: help secrets pki client-cert revoke-cert up down logs build admin test test-unit test-db db-up db-down lint fmt audit web-install web-dev web-test web-build web-lint
+.PHONY: help secrets pki client-cert revoke-cert e2e up down logs build admin test test-unit test-db db-up db-down lint fmt audit web-install web-dev web-test web-build web-lint
 
 help: ## Show targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  %-10s %s\n", $$1, $$2}'
@@ -82,6 +82,9 @@ test-db: db-up ## Full test suite including Postgres integration tests
 	DATABASE_URL=$(TEST_DB_URL) cargo test --workspace
 
 test: test-db ## Alias for test-db
+
+e2e: ## End-to-end test of the compose stack (isolated project, ports 28443/28444; KEEP=1 keeps it)
+	deploy/e2e/run.sh
 
 lint: ## rustfmt check + clippy (warnings are errors)
 	cargo fmt --all -- --check

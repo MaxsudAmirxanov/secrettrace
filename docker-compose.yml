@@ -6,6 +6,11 @@
 # https://<host>:8443/api/v1/ingest/ with a client certificate for agents and CI. The
 # server itself has no published port. ST_EDGE_BIND (default 127.0.0.1) sets the host
 # address; ST_EDGE_SUBNET / ST_EDGE_PROXY_IP move the edge network if 10.213.0.0/24 is taken.
+#
+# Other overrides (defaults in parentheses; the E2E test in deploy/e2e uses them to run a
+# second, isolated stack next to this one): ST_EDGE_HTTPS_PORT (443), ST_EDGE_MTLS_PORT
+# (8443), ST_SECRETS_DIR (./deploy/secrets), ST_PKI_DIR (./deploy/pki/out), ST_WORKER_DIR
+# (./deploy/worker), ST_IMAGE_TAG (dev), ST_WORKER_ALLOW_LOCAL_REPOS (false).
 name: secrettrace
 
 x-server-hardening: &hardening
@@ -36,7 +41,7 @@ services:
   migrate:
     <<: *hardening
     build: .
-    image: secrettrace-server:dev
+    image: secrettrace-server:${ST_IMAGE_TAG:-dev}
     command: ["migrate"]
     environment:
       ST_DATABASE_URL_FILE: /run/secrets/app_database_url
@@ -51,7 +56,7 @@ services:
 
   server:
     <<: *hardening
-    image: secrettrace-server:dev
+    image: secrettrace-server:${ST_IMAGE_TAG:-dev}
     command: ["serve"]
     environment:
       ST_DATABASE_URL_FILE: /run/secrets/app_database_url
@@ -84,13 +89,13 @@ services:
       - ./deploy/nginx/proxy_headers.conf:/etc/nginx/secrettrace/proxy_headers.conf:ro
       # Single files: the CA private key never enters the container. A missing file is an
       # error (run `make pki`), not an empty directory created in its place.
-      - { type: bind, source: ./deploy/pki/out/server/fullchain.crt, target: /etc/nginx/pki/fullchain.crt, read_only: true, bind: { create_host_path: false } }
-      - { type: bind, source: ./deploy/pki/out/server/server.key, target: /etc/nginx/pki/server.key, read_only: true, bind: { create_host_path: false } }
-      - { type: bind, source: ./deploy/pki/out/ca/ca.crt, target: /etc/nginx/pki/ca.crt, read_only: true, bind: { create_host_path: false } }
-      - { type: bind, source: ./deploy/pki/out/ca/crl.pem, target: /etc/nginx/pki/crl.pem, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${ST_PKI_DIR:-./deploy/pki/out}/server/fullchain.crt", target: /etc/nginx/pki/fullchain.crt, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${ST_PKI_DIR:-./deploy/pki/out}/server/server.key", target: /etc/nginx/pki/server.key, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${ST_PKI_DIR:-./deploy/pki/out}/ca/ca.crt", target: /etc/nginx/pki/ca.crt, read_only: true, bind: { create_host_path: false } }
+      - { type: bind, source: "${ST_PKI_DIR:-./deploy/pki/out}/ca/crl.pem", target: /etc/nginx/pki/crl.pem, read_only: true, bind: { create_host_path: false } }
     ports:
-      - "${ST_EDGE_BIND:-127.0.0.1}:443:8443"
-      - "${ST_EDGE_BIND:-127.0.0.1}:8443:9443"
+      - "${ST_EDGE_BIND:-127.0.0.1}:${ST_EDGE_HTTPS_PORT:-443}:8443"
+      - "${ST_EDGE_BIND:-127.0.0.1}:${ST_EDGE_MTLS_PORT:-8443}:9443"
     depends_on: [server]
     networks:
       edge:
@@ -100,7 +105,7 @@ services:
   worker:
     <<: *hardening
     build: { context: ., target: worker }
-    image: secrettrace-worker:dev
+    image: secrettrace-worker:${ST_IMAGE_TAG:-dev}
     command: ["worker"]
     environment:
       ST_DATABASE_URL_FILE: /run/secrets/app_database_url
@@ -114,6 +119,8 @@ services:
       ST_WORKER_ALLOWED_HOSTS: ${ST_WORKER_ALLOWED_HOSTS:-}
       ST_WORKER_ALLOW_ANY_HOST: ${ST_WORKER_ALLOW_ANY_HOST:-false}
       ST_WORKER_MAX_REPO_BYTES: ${ST_WORKER_MAX_REPO_BYTES:-2147483648}
+      # Development and tests only: file:// sources (the repository must be mounted in).
+      ST_WORKER_ALLOW_LOCAL_REPOS: ${ST_WORKER_ALLOW_LOCAL_REPOS:-false}
     # No data_key: the worker never touches TOTP seeds.
     secrets: [app_database_url, pepper_keys]
     tmpfs: ["/tmp:size=64m,mode=1777"]
@@ -124,21 +131,21 @@ services:
       nofile: { soft: 4096, hard: 4096 }
     volumes:
       - worker-data:/var/lib/secrettrace/worker
-      - ./deploy/worker/git-credentials:/run/git-credentials:ro
-      - ./deploy/worker/ssh_known_hosts:/etc/secrettrace/ssh_known_hosts:ro
+      - ${ST_WORKER_DIR:-./deploy/worker}/git-credentials:/run/git-credentials:ro
+      - ${ST_WORKER_DIR:-./deploy/worker}/ssh_known_hosts:/etc/secrettrace/ssh_known_hosts:ro
     depends_on:
       migrate: { condition: service_completed_successfully }
     networks: [db, egress]
     restart: unless-stopped
 
 secrets:
-  postgres_password:  { file: ./deploy/secrets/postgres_password }
-  owner_db_password:  { file: ./deploy/secrets/owner_db_password }
-  app_db_password:    { file: ./deploy/secrets/app_db_password }
-  owner_database_url: { file: ./deploy/secrets/owner_database_url }
-  app_database_url:   { file: ./deploy/secrets/app_database_url }
-  pepper_keys:        { file: ./deploy/secrets/pepper_keys }
-  data_key:           { file: ./deploy/secrets/data_key }
+  postgres_password:  { file: "${ST_SECRETS_DIR:-./deploy/secrets}/postgres_password" }
+  owner_db_password:  { file: "${ST_SECRETS_DIR:-./deploy/secrets}/owner_db_password" }
+  app_db_password:    { file: "${ST_SECRETS_DIR:-./deploy/secrets}/app_db_password" }
+  owner_database_url: { file: "${ST_SECRETS_DIR:-./deploy/secrets}/owner_database_url" }
+  app_database_url:   { file: "${ST_SECRETS_DIR:-./deploy/secrets}/app_database_url" }
+  pepper_keys:        { file: "${ST_SECRETS_DIR:-./deploy/secrets}/pepper_keys" }
+  data_key:           { file: "${ST_SECRETS_DIR:-./deploy/secrets}/data_key" }
 
 volumes:
   pgdata:

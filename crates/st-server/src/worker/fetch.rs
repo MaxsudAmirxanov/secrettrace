@@ -12,6 +12,7 @@
 //! bounds, and nothing git or the remote prints is stored: failures map to fixed messages.
 
 use std::fmt::Write as _;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -60,6 +61,9 @@ pub struct GitEnv<'a> {
     pub known_hosts: Option<&'a Path>,
     /// The fetch is stopped once `objects/` grows past this.
     pub max_repo_bytes: u64,
+    /// The checked address of a pinned remote ([`super::remote::resolve_pinned`]): git
+    /// connects to it instead of resolving the name again.
+    pub pinned: Option<IpAddr>,
 }
 
 impl std::fmt::Debug for GitEnv<'_> {
@@ -121,6 +125,9 @@ impl GitEnv<'_> {
         if local {
             cmd.args(["-c", "protocol.file.allow=always"]);
         }
+        if let Some(pin) = self.curl_resolve() {
+            cmd.args(["-c", &pin]);
+        }
         for setting in [
             "http.followRedirects=false",
             "http.lowSpeedLimit=1000",
@@ -147,6 +154,17 @@ impl GitEnv<'_> {
         Ok(cmd)
     }
 
+    /// `http.curloptResolve=<host>:<port>:<addr>` for a pinned https remote.
+    fn curl_resolve(&self) -> Option<String> {
+        let ip = self.pinned.filter(|_| self.remote.transport == Transport::Https)?;
+        let port = self.remote.port.unwrap_or(443);
+        let addr = match ip {
+            IpAddr::V4(v4) => v4.to_string(),
+            IpAddr::V6(v6) => format!("[{v6}]"),
+        };
+        Some(format!("http.curloptResolve={}:{port}:{addr}", self.remote.host))
+    }
+
     /// `GIT_SSH_COMMAND` (run by git through `sh -c`): every path single-quoted.
     fn ssh_command(&self) -> Result<String, JobError> {
         let quote = |p: &Path| -> Result<String, JobError> {
@@ -162,6 +180,11 @@ impl GitEnv<'_> {
         );
         let known_hosts = self.known_hosts.map(quote).transpose()?.unwrap_or_else(|| "/dev/null".into());
         let _ = write!(cmd, " -o UserKnownHostsFile={known_hosts} -o GlobalKnownHostsFile=/dev/null");
+        if let Some(ip) = self.pinned.filter(|_| self.remote.transport == Transport::Ssh) {
+            // Connect to the checked address; the host key is still looked up by name.
+            // (`remote.host` is `[A-Za-z0-9.-]` only, an `IpAddr` prints digits, `.`, `:`.)
+            let _ = write!(cmd, " -o HostName={ip} -o HostKeyAlias={} -o CheckHostIP=no", self.remote.host);
+        }
         if let Some(key) = &self.ssh_key {
             let _ = write!(cmd, " -o IdentityFile={}", quote(key)?);
         } else {
@@ -407,6 +430,8 @@ pub fn classify(name: &str, stderr: &[u8]) -> JobError {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -487,7 +512,8 @@ mod tests {
 
     #[test]
     fn ssh_command_quotes_paths_and_never_uses_agents() {
-        let remote = Remote { transport: Transport::Ssh, host: "git.example".into(), user: None };
+        let remote =
+            Remote { transport: Transport::Ssh, host: "git.example".into(), user: None, port: None, pin: true };
         let env = GitEnv {
             git: Path::new("git"),
             uri: "ssh://git.example/a.git",
@@ -499,13 +525,42 @@ mod tests {
             ssh_key: Some(PathBuf::from("/tmp/h/id_key")),
             known_hosts: Some(Path::new("/etc/kh")),
             max_repo_bytes: 1,
+            pinned: None,
         };
         let cmd = env.ssh_command().unwrap_or_default();
         assert!(cmd.contains("-o IdentityFile='/tmp/h/id_key'"), "{cmd}");
         assert!(cmd.contains("-o UserKnownHostsFile='/etc/kh'"), "{cmd}");
         assert!(cmd.contains("-o User='git'") && cmd.contains("BatchMode=yes") && cmd.contains("ForwardAgent=no"));
         assert!(cmd.contains("ConnectTimeout=30") && cmd.contains("ServerAliveInterval=15"));
-        let quoted = GitEnv { ssh_key: Some(PathBuf::from("/tmp/it's")), ..env };
+        assert!(!cmd.contains("HostName="), "not pinned: {cmd}");
+        let pinned = GitEnv { pinned: Some("140.82.112.3".parse().unwrap()), ..env };
+        let cmd = pinned.ssh_command().unwrap_or_default();
+        assert!(cmd.contains("-o HostName=140.82.112.3 -o HostKeyAlias=git.example -o CheckHostIP=no"), "{cmd}");
+        assert_eq!(pinned.curl_resolve(), None, "ssh remotes are pinned through ssh, not curl");
+        let quoted = GitEnv { ssh_key: Some(PathBuf::from("/tmp/it's")), ..pinned };
         assert!(quoted.ssh_command().is_err());
+    }
+
+    #[test]
+    fn https_pin_goes_to_curl() {
+        let remote =
+            Remote { transport: Transport::Https, host: "git.example".into(), user: None, port: None, pin: true };
+        let env = GitEnv {
+            git: Path::new("git"),
+            uri: "https://git.example/a.git",
+            remote: &remote,
+            home: Path::new("/tmp/h"),
+            askpass: Path::new("/bin/false"),
+            token_file: None,
+            username: None,
+            ssh_key: None,
+            known_hosts: None,
+            max_repo_bytes: 1,
+            pinned: Some("2606:4700::6810:84e5".parse().unwrap()),
+        };
+        assert_eq!(env.curl_resolve().as_deref(), Some("http.curloptResolve=git.example:443:[2606:4700::6810:84e5]"));
+        let on_port = Remote { port: Some(8443), ..remote.clone() };
+        let env = GitEnv { remote: &on_port, pinned: Some("140.82.112.3".parse().unwrap()), ..env };
+        assert_eq!(env.curl_resolve().as_deref(), Some("http.curloptResolve=git.example:8443:140.82.112.3"));
     }
 }
